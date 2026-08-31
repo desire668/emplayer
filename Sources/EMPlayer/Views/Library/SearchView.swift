@@ -95,10 +95,10 @@ struct SearchView: View {
         Task.detached {
             do {
                 let r = try await EmbyClient.shared.getItems(
+                    sortBy: ["SortName"],
                     recursive: true,
                     searchTerm: q,
-                    limit: 100,
-                    sortBy: ["SortName"]
+                    limit: 100
                 )
                 try Task.checkCancellation()
                 await MainActor.run {

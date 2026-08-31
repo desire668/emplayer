@@ -125,9 +125,9 @@ public final class AppState: ObservableObject {
         if let cached = libraryCache[key] { return cached }
         let result = try await EmbyClient.shared.getItems(
             parentId: folder.id,
-            recursive: recursive,
+            filters: filters.isEmpty ? nil : filters,
             sortBy: sortBy,
-            filters: filters
+            recursive: recursive
         )
         libraryCache[key] = result
         return result

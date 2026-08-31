@@ -94,9 +94,9 @@ struct HomeView: View {
                 async let r1 = EmbyClient.shared.getResumeItems(limit: 20)
                 async let r2 = EmbyClient.shared.getNextUp(limit: 20)
                 async let r3 = EmbyClient.shared.getItems(
-                    recursive: true,
                     sortBy: ["DateCreated"],
                     sortOrder: "Descending",
+                    recursive: true,
                     includeItemTypes: ["Movie","Series","MusicAlbum","Season","Episode","MusicVideo"],
                     limit: 20
                 )

@@ -299,11 +299,11 @@ struct LibraryFolderView: View {
         do {
             let result = try await EmbyClient.shared.getItems(
                 parentId: folder.id,
-                recursive: !isFolderOnly,
+                filters: filter.filters.isEmpty ? nil : filter.filters,
                 sortBy: sortBy.param,
                 sortOrder: sortOrder.param,
-                filters: filter.filters,
-                searchTerm: searchText.isEmpty ? nil : searchTerm,
+                recursive: !isFolderOnly,
+                searchTerm: searchText.isEmpty ? nil : searchText,
                 limit: 500,
                 isFavorite: filter.isFavorite,
                 hasPlayed: filter.hasPlayed

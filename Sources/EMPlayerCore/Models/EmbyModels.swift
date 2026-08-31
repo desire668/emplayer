@@ -4,7 +4,7 @@ import Foundation
 
 public struct EmbyServer: Codable, Identifiable, Equatable, Hashable {
     public var id: String { name + host }
-    public let name: String
+    public var name: String
     public let host: String       // e.g. "http://192.168.1.100:8096"
     public var apiKey: String?
     public var userId: String?

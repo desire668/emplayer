@@ -284,7 +284,7 @@ public struct NameIdPair: Codable, Equatable, Hashable {
 
 public struct MediaSource: Codable, Identifiable, Equatable, Hashable {
     public let id: String
-    public let protocol: String?
+    public let `protocol`: String?
     public let path: String?
     public let container: String?
     public let size: Int64?

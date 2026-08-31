@@ -1,0 +1,83 @@
+name: EMPlayer
+options:
+  bundleIdPrefix: com.emplayer
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+  xcodeVersion: "15.0"
+  findCarthageFrameworks: false
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_BITCODE: "NO"
+    OTHER_LDFLAGS:
+      - "-ObjC"
+      - "-lc++"
+      - "-lz"
+      - "-lbz2"
+      - "-liconv"
+
+targets:
+  EMPlayer:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/EMPlayer
+    resources:
+      - path: Resources
+    info:
+      path: Sources/EMPlayer/Info.plist
+      properties:
+        CFBundleDisplayName: EMPlayer
+        CFBundleName: EMPlayer
+        UILaunchScreen:
+          UIColorName: LaunchScreenBackgroundColor
+          UIImageName: LaunchImage
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIRequiresFullScreen: false
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        UIBackgroundModes:
+          - audio
+          - fetch
+        NSCameraUsageDescription: 需要访问相册来选择视频文件
+        NSPhotoLibraryUsageDescription: 需要访问相册来选择视频文件
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.emplayer.app
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: "YES"
+        INFOPLIST_KEY_UILaunchScreen_Generation: "NO"
+        GENERATE_INFOPLIST_FILE: "NO"
+        CODE_SIGN_ENTITLEMENTS: Sources/EMPlayer/EMPlayer.entitlements
+    dependencies:
+      - package: KSPlayer
+      - package: KeychainSwift
+      - package: Kingfisher
+      - package: SwiftyJSON
+
+packages:
+  KSPlayer:
+    url: https://github.com/kingslay/KSPlayer.git
+    majorVersion: 0.6.0
+  KeychainSwift:
+    url: https://github.com/evgenyneu/keychain-swift.git
+    from: 20.0.0
+  Kingfisher:
+    url: https://github.com/onevcat/Kingfisher.git
+    from: 7.0.0
+  SwiftyJSON:
+    url: https://github.com/SwiftyJSON/SwiftyJSON.git
+    from: 5.0.0

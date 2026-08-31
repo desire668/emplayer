@@ -1,0 +1,32 @@
+# Xcode
+.DS_Store
+*.xcuserstate
+xcuserdata/
+*.xcworkspace
+*.xcodeproj
+!*.xcodeproj/project.pbxproj
+
+# Swift Package Manager
+.swiftpm/
+.build/
+
+# XcodeGen
+*.xcodeproj/
+!project.yml
+
+# Build artifacts
+DerivedData/
+build/
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Test artifacts
+*.xcresult
+coverage/
+
+# Other
+.idea/
+.vscode/
+*.log
+Pods/

@@ -1,0 +1,33 @@
+# 定义 issue / PR 的自动打标签规则
+bug:
+  - '(?i)^.*bug.*$'
+  - '(?i).*fix.*'
+  - '(?i).*问题.*'
+enhancement:
+  - '(?i)^.*feat.*$'
+  - '(?i).*新功能.*'
+  - '(?i).*优化.*'
+documentation:
+  - '(?i).*doc.*'
+  - '(?i).*readme.*'
+  - '(?i).*文档.*'
+ios:
+  - '(?i).*ios.*'
+player:
+  - '(?i).*ksplayer.*'
+  - '(?i).*播放.*'
+emby:
+  - '(?i).*emby.*'
+  - '(?i).*服务器.*'
+  - '(?i).*api.*'
+ci:
+  - '(?i).*github action.*'
+  - '(?i).*workflow.*'
+  - '(?i).*ipa.*'
+  - '(?i).*ci.*'
+dependencies:
+  - '(?i).*dependabot.*'
+  - '(?i).*升级.*依赖.*'
+ui:
+  - '(?i).*界面.*'
+  - '(?i).*swiftui.*'

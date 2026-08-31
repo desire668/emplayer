@@ -1,0 +1,482 @@
+name: Build iOS App (CI)
+
+# 触发条件：
+# - push 到 main 分支
+# - tag v* (发布版本)
+# - PR 到 main
+# - 手动触发 workflow_dispatch
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+    paths-ignore:
+      - '**.md'
+      - '.github/labeler.yml'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      build_configuration:
+        description: 'Build Configuration'
+        required: true
+        default: 'Release'
+        type: choice
+        options:
+          - Release
+          - Debug
+      sign_export:
+        description: 'Sign and Export IPA (requires Secrets)'
+        required: false
+        default: true
+        type: boolean
+
+# 环境变量（全局配置）
+env:
+  APP_NAME: EMPlayer
+  DESTINATION: 'generic/platform=iOS'
+  XCODEGEN_VERSION: '2.42.0'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ===========================================================
+  # JOB 1: 分析与生成 Xcode 项目
+  # ===========================================================
+  generate-project:
+    name: 生成 Xcode 项目
+    runs-on: macos-15
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      build: ${{ steps.version.outputs.build }}
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: 安装 XcodeGen
+        run: |
+          brew install xcodegen || true
+          xcodegen --version || true
+          # 如果 brew 版本缺失，直接下载预编译
+          if ! command -v xcodegen &> /dev/null; then
+            curl -L "https://github.com/yonaskolb/XcodeGen/releases/download/${{ env.XCODEGEN_VERSION }}/xcodegen.zip" -o /tmp/xcodegen.zip
+            unzip -o /tmp/xcodegen.zip -d /usr/local/bin/
+            xcodegen --version
+          fi
+
+      - name: 缓存 SwiftPM 依赖
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            ~/.build
+          key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved', '**/project.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
+      - name: 读取版本号
+        id: version
+        run: |
+          # 从 git tag 读版本，否则 fallback
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="1.0.0"
+          fi
+          BUILD_NUMBER="${GITHUB_RUN_NUMBER}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "build=${BUILD_NUMBER}" >> $GITHUB_OUTPUT
+          echo "版本: ${VERSION} (${BUILD_NUMBER})"
+
+      - name: 生成 Xcode 项目
+        run: |
+          xcodegen generate --spec project.yml --use-cache || xcodegen generate --spec project.yml
+          ls -la "${{ env.APP_NAME }}.xcodeproj"
+
+      - name: 上传生成的 Xcode 项目（供下游 job 复用）
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcode-project
+          path: |
+            ${{ env.APP_NAME }}.xcodeproj/
+            project.yml
+            Package.swift
+            Package.resolved
+          retention-days: 7
+
+  # ===========================================================
+  # JOB 2: 构建 iOS Simulator 版 + 单元/集成测试（无签名要求）
+  # ===========================================================
+  build-simulator:
+    name: 构建 iOS 模拟器 + 基本校验
+    runs-on: macos-15
+    needs: generate-project
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 下载 Xcode 项目 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: xcode-project
+
+      - name: 缓存 SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            ~/.build
+          key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved', '**/project.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
+      - name: 配置 Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: 解析 Swift 包
+        run: |
+          xcodebuild \
+            -project "${{ env.APP_NAME }}.xcodeproj" \
+            -scheme "${{ env.APP_NAME }}" \
+            -resolvePackageDependencies \
+            -scmProvider system
+
+      - name: 构建 Simulator 版本
+        run: |
+          xcodebuild \
+            -project "${{ env.APP_NAME }}.xcodeproj" \
+            -scheme "${{ env.APP_NAME }}" \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'platform=iOS Simulator,name=iPhone 16 Pro' \
+            -derivedDataPath DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build | xcbeautify --renderer github-actions
+
+      - name: 上传 Simulator .app
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: EMPlayer-Simulator
+          path: |
+            DerivedData/Build/Products/Debug-iphonesimulator/${{ env.APP_NAME }}.app
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ===========================================================
+  # JOB 3: 构建 Device 版 + 导出 IPA（签名可选）
+  # ===========================================================
+  build-device-ipa:
+    name: 构建 iOS IPA (Device)
+    runs-on: macos-15
+    needs: [generate-project, build-simulator]
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Release]
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 下载 Xcode 项目 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: xcode-project
+
+      - name: 缓存 SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            ~/.build
+          key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved', '**/project.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
+      - name: 安装 xcbeautify
+        run: brew install xcbeautify
+
+      - name: 配置 Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: 决定构建配置
+        id: config
+        run: |
+          CFG="${{ github.event.inputs.build_configuration || matrix.configuration }}"
+          echo "config=${CFG}" >> $GITHUB_OUTPUT
+
+      # ============= 可选：代码签名（仅当 Secrets 存在时启用） =============
+      - name: 检查签名 Secrets 是否可用
+        id: secrets-check
+        run: |
+          HAS_TEAM="false"
+          if [ -n "${{ secrets.IOS_DEVELOPMENT_TEAM }}" ]; then
+            HAS_TEAM="true"
+          fi
+          echo "has_team=${HAS_TEAM}" >> $GITHUB_OUTPUT
+
+      - name: 设置代码签名
+        if: steps.secrets-check.outputs.has_team == 'true'
+        env:
+          IOS_CODE_SIGN_IDENTITY: ${{ secrets.IOS_CODE_SIGN_IDENTITY }}
+          IOS_PROVISIONING_PROFILE_SPECIFIER: ${{ secrets.IOS_PROVISIONING_PROFILE_SPECIFIER }}
+          IOS_DEVELOPMENT_TEAM: ${{ secrets.IOS_DEVELOPMENT_TEAM }}
+        run: |
+          # 写入临时的 xcconfig
+          mkdir -p Build
+          cat > Build/Sign.xcconfig <<EOF
+          DEVELOPMENT_TEAM = ${IOS_DEVELOPMENT_TEAM}
+          CODE_SIGN_STYLE = Manual
+          CODE_SIGN_IDENTITY = ${IOS_CODE_SIGN_IDENTITY:-"Apple Development"}
+          PROVISIONING_PROFILE_SPECIFIER = ${IOS_PROVISIONING_PROFILE_SPECIFIER}
+          CODE_SIGN_ENTITLEMENTS = Sources/EMPlayer/EMPlayer.entitlements
+          EOF
+          echo "签名 xcconfig 已生成"
+          cat Build/Sign.xcconfig
+
+      # 可选：使用 fastlane match 同步证书 / 描述文件（需额外配置）
+      - name: 安装 fastlane (可选)
+        if: steps.secrets-check.outputs.has_team == 'true'
+        run: |
+          if command -v gem &> /dev/null; then
+            gem install fastlane --no-document 2>/dev/null || true
+          fi
+
+      - name: 解析 Swift 包
+        run: |
+          xcodebuild \
+            -project "${{ env.APP_NAME }}.xcodeproj" \
+            -scheme "${{ env.APP_NAME }}" \
+            -resolvePackageDependencies \
+            -scmProvider system
+
+      - name: 注入版本号
+        run: |
+          VERSION="${{ needs.generate-project.outputs.version }}"
+          BUILD="${{ needs.generate-project.outputs.build }}"
+          echo "MARKETING_VERSION=${VERSION}" > Build/Version.xcconfig
+          echo "CURRENT_PROJECT_VERSION=${BUILD}" >> Build/Version.xcconfig
+          plutil -replace CFBundleShortVersionString -string "${VERSION}" Sources/EMPlayer/Info.plist 2>/dev/null || true
+          plutil -replace CFBundleVersion -string "${BUILD}" Sources/EMPlayer/Info.plist 2>/dev/null || true
+
+      - name: 归档 (Archive) iOS 设备版
+        id: archive
+        env:
+          DEVELOPMENT_TEAM: ${{ secrets.IOS_DEVELOPMENT_TEAM }}
+          SIGN: ${{ steps.secrets-check.outputs.has_team }}
+        run: |
+          EXTRA_ARGS=()
+          if [ "${SIGN}" == "true" ]; then
+            EXTRA_ARGS+=(-xcconfig "Build/Sign.xcconfig")
+          else
+            EXTRA_ARGS+=(CODE_SIGNING_ALLOWED=NO)
+            EXTRA_ARGS+=(CODE_SIGNING_REQUIRED=NO)
+            EXTRA_ARGS+=(CODE_SIGN_IDENTITY="")
+            EXTRA_ARGS+=(PROVISIONING_PROFILE_SPECIFIER="")
+          fi
+          if [ -f Build/Version.xcconfig ]; then
+            EXTRA_ARGS+=(-xcconfig "Build/Version.xcconfig")
+          fi
+
+          xcodebuild \
+            -project "${{ env.APP_NAME }}.xcodeproj" \
+            -scheme "${{ env.APP_NAME }}" \
+            -configuration "${{ steps.config.outputs.config }}" \
+            -destination "${{ env.DESTINATION }}" \
+            -archivePath "Build/${{ env.APP_NAME }}.xcarchive" \
+            -derivedDataPath DerivedData \
+            -scmProvider system \
+            "${EXTRA_ARGS[@]}" \
+            archive | xcbeautify --renderer github-actions
+
+          ls -la Build/
+
+      - name: 上传 xcarchive
+        if: always() && steps.archive.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: EMPlayer-xcarchive-${{ matrix.configuration }}
+          path: Build/${{ env.APP_NAME }}.xcarchive
+          retention-days: 14
+          compression-level: 6
+          if-no-files-found: ignore
+
+      # ============= 导出 IPA（需要签名）=============
+      - name: 生成 ExportOptions.plist
+        if: steps.secrets-check.outputs.has_team == 'true'
+        id: export-options
+        env:
+          EXPORT_METHOD: ${{ secrets.IOS_EXPORT_METHOD || 'development' }}
+          IOS_DEVELOPMENT_TEAM: ${{ secrets.IOS_DEVELOPMENT_TEAM }}
+          IOS_PROVISIONING_PROFILE_SPECIFIER: ${{ secrets.IOS_PROVISIONING_PROFILE_SPECIFIER }}
+        run: |
+          EXPORT_DIR="Build/Export"
+          mkdir -p "${EXPORT_DIR}"
+          cat > "${EXPORT_DIR}/ExportOptions.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>method</key>
+              <string>${EXPORT_METHOD}</string>
+              <key>teamID</key>
+              <string>${IOS_DEVELOPMENT_TEAM}</string>
+              <key>signingStyle</key>
+              <string>manual</string>
+              <key>provisioningProfiles</key>
+              <dict>
+                  <key>com.emplayer.app</key>
+                  <string>${IOS_PROVISIONING_PROFILE_SPECIFIER}</string>
+              </dict>
+              <key>signingCertificate</key>
+              <string>${{ secrets.IOS_CODE_SIGN_IDENTITY || 'Apple Distribution' }}</string>
+              <key>stripSwiftSymbols</key>
+              <true/>
+              <key>uploadBitcode</key>
+              <false/>
+              <key>uploadSymbols</key>
+              <true/>
+              <key>thinning</key>
+              <string>&lt;none&gt;</string>
+          </dict>
+          </plist>
+          PLIST
+          cat "${EXPORT_DIR}/ExportOptions.plist"
+          echo "options=${EXPORT_DIR}/ExportOptions.plist" >> $GITHUB_OUTPUT
+
+      - name: 导出 IPA
+        if: steps.secrets-check.outputs.has_team == 'true' && steps.archive.outcome == 'success'
+        id: export
+        env:
+          DEVELOPMENT_TEAM: ${{ secrets.IOS_DEVELOPMENT_TEAM }}
+        run: |
+          EXPORT_DIR="Build/Export"
+          mkdir -p "${EXPORT_DIR}"
+          xcodebuild \
+            -exportArchive \
+            -archivePath "Build/${{ env.APP_NAME }}.xcarchive" \
+            -exportPath "${EXPORT_DIR}" \
+            -exportOptionsPlist "${{ steps.export-options.outputs.options }}" \
+            -allowProvisioningUpdates \
+            | xcbeautify --renderer github-actions
+
+          IPA=$(find "${EXPORT_DIR}" -maxdepth 2 -name "*.ipa" | head -n 1)
+          echo "ipa_path=${IPA}" >> $GITHUB_OUTPUT
+          if [ -n "${IPA}" ]; then
+            echo "✅ 导出成功: ${IPA}"
+            ls -lh "${IPA}"
+            # Copy + rename with version for release artifact
+            VERSION="${{ needs.generate-project.outputs.version }}"
+            BUILD="${{ needs.generate-project.outputs.build }}"
+            cp "${IPA}" "Build/${{ env.APP_NAME }}-${VERSION}-${BUILD}.ipa"
+            echo "final_ipa=Build/${{ env.APP_NAME }}-${VERSION}-${BUILD}.ipa" >> $GITHUB_OUTPUT
+          else
+            echo "❌ IPA 未生成"
+            ls -R "${EXPORT_DIR}"
+            exit 1
+          fi
+
+      - name: 上传 IPA 构建产物
+        if: steps.export.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: EMPlayer-IPA-${{ matrix.configuration }}
+          path: |
+            ${{ steps.export.outputs.final_ipa }}
+            Build/Export/*.ipa
+          retention-days: 30
+          compression-level: 0
+
+      - name: dSYM 符号上传
+        if: steps.export.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: EMPlayer-dSYM-${{ matrix.configuration }}
+          path: Build/${{ env.APP_NAME }}.xcarchive/dSYMs/*.dSYM
+          retention-days: 90
+          compression-level: 6
+          if-no-files-found: ignore
+
+  # ===========================================================
+  # JOB 4: 上传 Release（仅 tag v* 且 IPA 构建成功时）
+  # ===========================================================
+  release:
+    name: 发布 GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-device-ipa]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 下载所有构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: EMPlayer-IPA-*
+          merge-multiple: true
+
+      - name: 列出下载产物
+        run: |
+          ls -lhR artifacts/ || true
+
+      - name: 生成 Release Notes (Changelog)
+        id: notes
+        run: |
+          cat > ReleaseNotes.md <<'MD'
+          # EMPlayer ${{ github.ref_name }}
+          
+          ## What's Changed
+          - 基于 KSPlayer 内核的 Emby iOS 播放器首发版本
+          - 支持 Emby 服务器连接、多服务器切换
+          - 支持电影/剧集/音乐/图片浏览
+          - 支持直连播放 / HLS 转码
+          - 支持外挂字幕 (SRT/ASS/VTT)
+          - 支持播放进度同步到 Emby 服务器
+          - 支持后台音频播放
+          
+          ## 安装说明
+          1. 下载下面的 `.ipa` 文件
+          2. 通过 `sideloadly` / `AltStore` / Apple Configurator 或企业证书部署到设备
+          3. 首次打开应用，添加 Emby 服务器地址并登录
+          
+          ## 系统要求
+          - iOS 15.0+
+          - iPhone / iPad
+          MD
+          echo "notes=ReleaseNotes.md" >> $GITHUB_OUTPUT
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: EMPlayer ${{ github.ref_name }}
+          body_path: ${{ steps.notes.outputs.notes }}
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') }}
+          fail_on_unmatched_files: false
+          files: |
+            artifacts/*.ipa

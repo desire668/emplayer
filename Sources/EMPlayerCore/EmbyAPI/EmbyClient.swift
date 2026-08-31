@@ -232,7 +232,8 @@ extension EmbyClient {
         // Some Emby versions return array directly
         if result.items.isEmpty {
             do {
-                guard let url = currentServer?.baseURL().appending("/emby/Users/Public") else {
+                guard let base = currentServer?.baseURL(),
+                      let url = URL(string: base.appending("/emby/Users/Public")) else {
                     return []
                 }
                 var req = URLRequest(url: url)
@@ -599,7 +600,7 @@ extension EmbyClient {
     }
     
     public func chapterImageURL(itemId: String, chapterIndex: Int, imageTag: String?, width: Int = 400) -> URL? {
-        imageURL(itemId: item.id, tag: imageTag, type: "Chapter", maxWidth: width)
+        imageURL(itemId: itemId, tag: imageTag, type: "Chapter", maxWidth: width)
     }
     
     // MARK: - Stream / File URLs

@@ -319,7 +319,7 @@ jobs:
           compression-level: 6
           if-no-files-found: ignore
 
-      # ============= 导出 IPA（需要签名）=============
+      # ============= 路径 A：如果配置了签名 Secrets → 正式签名导出 IPA =============
       - name: 生成 ExportOptions.plist
         if: steps.secrets-check.outputs.has_team == 'true'
         id: export-options
@@ -362,7 +362,7 @@ jobs:
           cat "${EXPORT_DIR}/ExportOptions.plist"
           echo "options=${EXPORT_DIR}/ExportOptions.plist" >> $GITHUB_OUTPUT
 
-      - name: 导出 IPA
+      - name: 导出已签名 IPA
         if: steps.secrets-check.outputs.has_team == 'true' && steps.archive.outcome == 'success'
         id: export
         env:
@@ -379,34 +379,128 @@ jobs:
             | xcbeautify --renderer github-actions
 
           IPA=$(find "${EXPORT_DIR}" -maxdepth 2 -name "*.ipa" | head -n 1)
-          echo "ipa_path=${IPA}" >> $GITHUB_OUTPUT
           if [ -n "${IPA}" ]; then
-            echo "✅ 导出成功: ${IPA}"
+            echo "✅ 已签名 IPA 导出成功: ${IPA}"
             ls -lh "${IPA}"
-            # Copy + rename with version for release artifact
             VERSION="${{ needs.generate-project.outputs.version }}"
             BUILD="${{ needs.generate-project.outputs.build }}"
-            cp "${IPA}" "Build/${{ env.APP_NAME }}-${VERSION}-${BUILD}.ipa"
-            echo "final_ipa=Build/${{ env.APP_NAME }}-${VERSION}-${BUILD}.ipa" >> $GITHUB_OUTPUT
+            FINAL="Build/${{ env.APP_NAME }}-${VERSION}-${BUILD}.ipa"
+            cp "${IPA}" "${FINAL}"
+            echo "ipa_path=${IPA}" >> $GITHUB_OUTPUT
+            echo "final_ipa=${FINAL}" >> $GITHUB_OUTPUT
+            echo "signed=true" >> $GITHUB_OUTPUT
           else
             echo "❌ IPA 未生成"
             ls -R "${EXPORT_DIR}"
             exit 1
           fi
 
+      # ============= 路径 B：未配置签名 Secrets → 从 xcarchive 打 Unsigned IPA =============
+      # 这样用户下载后可用自己的证书重签（Sideloadly / AltStore / codesign）
+      - name: 打包 Unsigned IPA（无签名 Secrets 时兜底）
+        if: steps.secrets-check.outputs.has_team != 'true' && steps.archive.outcome == 'success'
+        id: export-unsigned
+        run: |
+          APP_PATH="Build/${{ env.APP_NAME }}.xcarchive/Products/Applications/${{ env.APP_NAME }}.app"
+          if [ ! -d "${APP_PATH}" ]; then
+            echo "❌ 未找到 .app: ${APP_PATH}"
+            ls -la "Build/${{ env.APP_NAME }}.xcarchive/Products/Applications/" 2>/dev/null || true
+            exit 1
+          fi
+
+          VERSION="${{ needs.generate-project.outputs.version }}"
+          BUILD="${{ needs.generate-project.outputs.build }}"
+          STAGE="Build/UnsignedStage"
+          rm -rf "${STAGE}"
+          mkdir -p "${STAGE}/Payload"
+          cp -R "${APP_PATH}" "${STAGE}/Payload/"
+
+          # 剔除归档里已有的 _CodeSignature / 嵌入式描述文件（都是空的/无效的，重签时会重写）
+          rm -rf "${STAGE}/Payload/${{ env.APP_NAME }}.app/_CodeSignature" 2>/dev/null || true
+          rm -f  "${STAGE}/Payload/${{ env.APP_NAME }}.app/embedded.mobileprovision" 2>/dev/null || true
+
+          FINAL="Build/${{ env.APP_NAME }}-${VERSION}-${BUILD}-unsigned.ipa"
+          (cd "${STAGE}" && zip -qry "../${FINAL##*/}" Payload/)
+          mv "${STAGE}/../${FINAL##*/}" "${FINAL}" 2>/dev/null || true
+          if [ ! -f "${FINAL}" ]; then
+            # macOS /usr/bin/zip 相对路径表现不同，保险起见再打一次
+            pushd "${STAGE}" >/dev/null
+            zip -qry "../UnsignedOutput.ipa" Payload/
+            popd >/dev/null
+            mv "Build/UnsignedOutput.ipa" "${FINAL}"
+          fi
+
+          echo "✅ Unsigned IPA 打包完成: ${FINAL}"
+          ls -lh "${FINAL}"
+          echo "final_ipa=${FINAL}" >> $GITHUB_OUTPUT
+          echo "signed=false" >> $GITHUB_OUTPUT
+
+      # ============= 合并输出：无论是已签名 / unsigned，统一 IPA artifact 名 =============
+      - name: 汇总 IPA 并上传 Artifact
+        if: steps.archive.outcome == 'success'
+        id: upload-ipa
+        run: |
+          # 优先取路径 A 已签名，否则路径 B unsigned
+          IPA_A="${{ steps.export.outputs.final_ipa }}"
+          IPA_B="${{ steps.export-unsigned.outputs.final_ipa }}"
+          FINAL=""
+          if [ -f "${IPA_A}" ]; then
+            FINAL="${IPA_A}"
+            KIND="signed"
+          elif [ -f "${IPA_B}" ]; then
+            FINAL="${IPA_B}"
+            KIND="unsigned"
+          else
+            echo "❌ 任何 IPA 都未生成"
+            ls -R Build/ | head -200
+            exit 1
+          fi
+          echo "最终 IPA: ${FINAL} (${KIND})"
+          ls -lh "${FINAL}"
+          echo "final_ipa=${FINAL}" >> $GITHUB_OUTPUT
+          echo "kind=${KIND}" >> $GITHUB_OUTPUT
+
+          # 放一个统一目录方便 release job 下载
+          OUT="Build/IPA-Final"
+          mkdir -p "${OUT}"
+          cp "${FINAL}" "${OUT}/"
+          # 额外附带一个 README，说明 unsigned IPA 需要重签
+          if [ "${KIND}" = "unsigned" ]; then
+            cat > "${OUT}/README-重签说明.txt" <<'TXT'
+          该 IPA 是未签名版本（unsigned IPA），必须使用你自己的证书和描述文件重签后才能安装。
+
+          推荐重签工具：
+            1. Sideloadly（免费，GUI，Windows / macOS） https://sideloadly.io
+               - 拖入 IPA + Apple ID → 开始 → 会自动重签并安装到连接的设备
+            2. AltStore（免费，自签 7 天有效）https://altstore.io
+            3. 命令行（需已安装证书 + 描述文件）：
+               $ unzip EMPlayer-xxx-unsigned.ipa
+               $ /usr/libexec/PlistBuddy -c 'Print :application-identifier' \
+                   "/path/to/your.mobileprovision"   # 查 Team+bundle id
+               $ cp /path/to/your.mobileprovision Payload/EMPlayer.app/embedded.mobileprovision
+               $ /usr/bin/codesign --force --sign "Apple Development: Your Name (TEAMID)" \
+                   --entitlements entitlements.plist \
+                   Payload/EMPlayer.app
+               $ zip -qry EMPlayer-resigned.ipa Payload
+            4. iOS App Signer（macOS GUI） https://dantheman827.github.io/ios-app-signer/
+
+          免费 Apple ID 重签的应用有效期为 7 天，开发者证书 1 年。
+          TXT
+          fi
+
       - name: 上传 IPA 构建产物
-        if: steps.export.outcome == 'success'
+        if: steps.upload-ipa.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: EMPlayer-IPA-${{ matrix.configuration }}
           path: |
-            ${{ steps.export.outputs.final_ipa }}
-            Build/Export/*.ipa
-          retention-days: 30
+            Build/IPA-Final/*.ipa
+            Build/IPA-Final/*.txt
+          retention-days: 90
           compression-level: 0
 
       - name: dSYM 符号上传
-        if: steps.export.outcome == 'success'
+        if: steps.archive.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: EMPlayer-dSYM-${{ matrix.configuration }}

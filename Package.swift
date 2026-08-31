@@ -1,16 +1,18 @@
 // swift-tools-version:5.9
 import PackageDescription
 
+// EMPlayerCore: 纯业务/网络/模型层的本地 Swift Package。
+// 由 XcodeGen 在 project.yml 里以 packages.EMPlayerCore.path: "." 引入，
+// iOS App target (EMPlayer) 通过 - package: EMPlayerCore 链接本 package 输出的库。
 let package = Package(
-    name: "EMPlayer",
+    name: "EMPlayerCore",
+    defaultLocalization: "en",
     platforms: [
         .iOS(.v15)
     ],
     products: [
-        .library(
-            name: "EMPlayerCore",
-            targets: ["EMPlayerCore"]
-        )
+        // 主产物：EMPlayerCore library（project.yml 里 package: EMPlayerCore 找的就是这个）
+        .library(name: "EMPlayerCore", targets: ["EMPlayerCore"])
     ],
     dependencies: [
         .package(url: "https://github.com/kingslay/KSPlayer.git", branch: "main"),
@@ -22,10 +24,10 @@ let package = Package(
         .target(
             name: "EMPlayerCore",
             dependencies: [
-                .product(name: "KSPlayer", package: "KSPlayer"),
-                .product(name: "KeychainSwift", package: "KeychainSwift"),
-                .product(name: "Kingfisher", package: "Kingfisher"),
-                .product(name: "SwiftyJSON", package: "SwiftyJSON")
+                .product(name: "KSPlayer",          package: "KSPlayer"),
+                .product(name: "KeychainSwift",     package: "keychain-swift"),
+                .product(name: "Kingfisher",        package: "Kingfisher"),
+                .product(name: "SwiftyJSON",        package: "SwiftyJSON")
             ],
             path: "Sources/EMPlayerCore"
         )

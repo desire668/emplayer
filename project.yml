@@ -63,12 +63,17 @@ targets:
         GENERATE_INFOPLIST_FILE: "NO"
         CODE_SIGN_ENTITLEMENTS: Sources/EMPlayer/EMPlayer.entitlements
     dependencies:
+      # 本地 Swift Package：EMPlayerCore（Models / EmbyAPI / Services / Utils）
+      - package: EMPlayerCore
       - package: KSPlayer
       - package: KeychainSwift
       - package: Kingfisher
       - package: SwiftyJSON
 
 packages:
+  # 本地 SPM package（仓库根目录的 Package.swift 会产出 EMPlayerCore library）
+  EMPlayerCore:
+    path: .
   KSPlayer:
     url: https://github.com/kingslay/KSPlayer.git
     branch: main

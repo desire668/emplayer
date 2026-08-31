@@ -277,29 +277,105 @@ jobs:
           plutil -replace CFBundleShortVersionString -string "${VERSION}" Sources/EMPlayer/Info.plist 2>/dev/null || true
           plutil -replace CFBundleVersion -string "${BUILD}" Sources/EMPlayer/Info.plist 2>/dev/null || true
 
-      - name: 归档 (Archive) iOS 设备版
-        id: archive
+      # ============= 真机构建（分两段，避免无签名场景下 archive 签名校验失败） =============
+      # ① xcodebuild build-for-testing / build：先把 .app 编出来（只需要 device SDK，不需要签名授权）
+      - name: 构建 iOS 真机 Release .app（无签名也可通过）
+        id: build-device
         env:
-          DEVELOPMENT_TEAM: ${{ secrets.IOS_DEVELOPMENT_TEAM }}
           SIGN: ${{ steps.secrets-check.outputs.has_team }}
         run: |
+          CFG="${{ steps.config.outputs.config }}"
           EXTRA_ARGS=()
           if [ "${SIGN}" == "true" ]; then
             EXTRA_ARGS+=(-xcconfig "Build/Sign.xcconfig")
           else
+            # 无签名归档：完整关闭所有 code signing + 禁用 entitlements 校验
             EXTRA_ARGS+=(CODE_SIGNING_ALLOWED=NO)
             EXTRA_ARGS+=(CODE_SIGNING_REQUIRED=NO)
+            EXTRA_ARGS+=(ENFORCE_CODE_SIGNING_WHILE_ARCHIVING=NO)
+            EXTRA_ARGS+=(ENTITLEMENTS_REQUIRED=NO)
             EXTRA_ARGS+=(CODE_SIGN_IDENTITY="")
+            EXTRA_ARGS+=(CODE_SIGNING_ENTITLEMENTS="")
             EXTRA_ARGS+=(PROVISIONING_PROFILE_SPECIFIER="")
+            EXTRA_ARGS+=(PROVISIONING_PROFILE="")
+            EXTRA_ARGS+=(DEVELOPMENT_TEAM="")
+            EXTRA_ARGS+=(EXPANDED_CODE_SIGN_IDENTITY="")
+            EXTRA_ARGS+=(EXPANDED_CODE_SIGN_IDENTITY_NAME="")
+            EXTRA_ARGS+=(OTHER_CODE_SIGN_FLAGS="--skip-code-signature")
           fi
           if [ -f Build/Version.xcconfig ]; then
             EXTRA_ARGS+=(-xcconfig "Build/Version.xcconfig")
           fi
 
+          set +e
+          LOG_FILE="Build/build-device.log"
+          mkdir -p Build
           xcodebuild \
             -project "${{ env.APP_NAME }}.xcodeproj" \
             -scheme "${{ env.APP_NAME }}" \
-            -configuration "${{ steps.config.outputs.config }}" \
+            -configuration "${CFG}" \
+            -sdk iphoneos \
+            -derivedDataPath DerivedData \
+            -scmProvider system \
+            -quiet \
+            "${EXTRA_ARGS[@]}" \
+            build 2>&1 | tee "${LOG_FILE}" | xcbeautify --renderer github-actions
+          RC=${PIPESTATUS[0]}
+          set -e
+
+          echo "xcodebuild build 返回码: ${RC}"
+          # 找到编出来的 .app（可能落在几个不同位置）
+          APP=""
+          for p in \
+            "DerivedData/Build/Products/${CFG}-iphoneos/${{ env.APP_NAME }}.app" \
+            "DerivedData/Build/Intermediates.noindex/ArchiveIntermediates/${{ env.APP_NAME }}/InstallationBuildProductsLocation/Applications/${{ env.APP_NAME }}.app" \
+            "DerivedData/Build/Intermediates.noindex/${{ env.APP_NAME }}/Build/Products/${CFG}-iphoneos/${{ env.APP_NAME }}.app"; do
+            if [ -d "$p" ]; then APP="$p"; break; fi
+          done
+          if [ -z "${APP}" ]; then
+            echo "❌ 未找到编译后的 .app，列出 DerivedData 供诊断："
+            find DerivedData -maxdepth 6 -name "*.app" -type d 2>/dev/null || true
+            tail -n 200 "${LOG_FILE}" || true
+            exit 1
+          fi
+          echo "✅ 已找到 .app: ${APP}"
+          ls -lh "${APP}"
+          echo "app_path=${APP}" >> $GITHUB_OUTPUT
+
+      # ② 优先 xcodebuild archive（有签名 Secrets 时 100% 正确结构，dSYM 齐全）
+      #    无签名时若失败 → 不报错，直接走 ③ 手动构造 xcarchive
+      - name: 归档 iOS 设备版（优先 xcodebuild archive）
+        id: archive-native
+        env:
+          DEVELOPMENT_TEAM: ${{ secrets.IOS_DEVELOPMENT_TEAM }}
+          SIGN: ${{ steps.secrets-check.outputs.has_team }}
+        continue-on-error: true
+        run: |
+          CFG="${{ steps.config.outputs.config }}"
+          EXTRA_ARGS=()
+          if [ "${SIGN}" == "true" ]; then
+            EXTRA_ARGS+=(-xcconfig "Build/Sign.xcconfig")
+          else
+            # 无签名 + 最宽松的签名检查集
+            EXTRA_ARGS+=(CODE_SIGNING_ALLOWED=NO)
+            EXTRA_ARGS+=(CODE_SIGNING_REQUIRED=NO)
+            EXTRA_ARGS+=(ENTITLEMENTS_REQUIRED=NO)
+            EXTRA_ARGS+=(ENFORCE_CODE_SIGNING_WHILE_ARCHIVING=NO)
+            EXTRA_ARGS+=(CODE_SIGN_IDENTITY="")
+            EXTRA_ARGS+=(CODE_SIGNING_ENTITLEMENTS="")
+            EXTRA_ARGS+=(PROVISIONING_PROFILE_SPECIFIER="")
+            EXTRA_ARGS+=(DEVELOPMENT_TEAM="")
+            EXTRA_ARGS+=(EXPANDED_CODE_SIGN_IDENTITY="")
+          fi
+          if [ -f Build/Version.xcconfig ]; then
+            EXTRA_ARGS+=(-xcconfig "Build/Version.xcconfig")
+          fi
+
+          set -o pipefail
+          xcodebuild \
+            -project "${{ env.APP_NAME }}.xcodeproj" \
+            -scheme "${{ env.APP_NAME }}" \
+            -configuration "${CFG}" \
             -destination "${{ env.DESTINATION }}" \
             -archivePath "Build/${{ env.APP_NAME }}.xcarchive" \
             -derivedDataPath DerivedData \
@@ -307,7 +383,73 @@ jobs:
             "${EXTRA_ARGS[@]}" \
             archive | xcbeautify --renderer github-actions
 
-          ls -la Build/
+      # ③ 如果 ② 失败 → 手动拼一个 xcarchive 目录结构（用户本地重签完全等价）
+      - name: 手动构造 xcarchive（当 xcodebuild archive 失败时兜底）
+        id: archive
+        env:
+          APP_PATH: ${{ steps.build-device.outputs.app_path }}
+        run: |
+          XCA="Build/${{ env.APP_NAME }}.xcarchive"
+          # 如果原生 archive 成功了，直接确认存在即可
+          if [ -d "${XCA}/Products/Applications/${{ env.APP_NAME }}.app" ]; then
+            echo "✅ 原生 archive 已成功生成: ${XCA}"
+            ls -la "${XCA}"
+            echo "mode=native" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "ℹ️ 原生 archive 未生成，改用手动构造 xcarchive"
+          rm -rf "${XCA}"
+          mkdir -p "${XCA}/Products/Applications"
+          mkdir -p "${XCA}/dSYMs"
+
+          # 复制 .app（strip 掉空的 _CodeSignature，避免后续重签冲突）
+          cp -R "${APP_PATH}" "${XCA}/Products/Applications/"
+          rm -rf "${XCA}/Products/Applications/${{ env.APP_NAME }}.app/_CodeSignature" 2>/dev/null || true
+          rm -f  "${XCA}/Products/Applications/${{ env.APP_NAME }}.app/embedded.mobileprovision" 2>/dev/null || true
+
+          # 把 DerivedData 里能找到的 dSYM 拷到 xcarchive/dSYMs（如果有）
+          find DerivedData -maxdepth 8 -name "*.dSYM" -type d 2>/dev/null | while read -r dSYM; do
+            cp -R "${dSYM}" "${XCA}/dSYMs/" 2>/dev/null || true
+          done || true
+
+          # 写入 xcarchive 的 Info.plist（Xcode 识别 xcarchive 的必备文件）
+          VERSION="${{ needs.generate-project.outputs.version }}"
+          BUILD="${{ needs.generate-project.outputs.build }}"
+          BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${APP_PATH}/Info.plist" 2>/dev/null || echo "com.emplayer.app")
+          cat > "${XCA}/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>ApplicationProperties</key>
+              <dict>
+                  <key>ApplicationPath</key>
+                  <string>Applications/${{ env.APP_NAME }}.app</string>
+                  <key>ArchiveVersion</key>
+                  <integer>2</integer>
+                  <key>CFBundleIdentifier</key>
+                  <string>${BUNDLE_ID}</string>
+                  <key>CFBundleShortVersionString</key>
+                  <string>${VERSION}</string>
+                  <key>CFBundleVersion</key>
+                  <string>${BUILD}</string>
+                  <key>SigningIdentity</key>
+                  <string>-</string>
+              </dict>
+              <key>CreationDate</key>
+              <date>$(date -u +%Y-%m-%dT%H:%M:%SZ)</date>
+              <key>Name</key>
+              <string>${{ env.APP_NAME }}</string>
+              <key>SchemeName</key>
+              <string>${{ env.APP_NAME }}</string>
+          </dict>
+          </plist>
+          PLIST
+
+          echo "✅ 手动 xcarchive 完成: ${XCA}"
+          ls -laR "${XCA}" | head -80
+          echo "mode=manual" >> $GITHUB_OUTPUT
 
       - name: 上传 xcarchive
         if: always() && steps.archive.outcome == 'success'

@@ -2,15 +2,12 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>com.apple.security.app-sandbox</key>
-    <false/>
-    <key>com.apple.security.files.user-selected.read-write</key>
-    <true/>
+    <!-- iOS: 后台 HTTP/HTTPS/HLS 视频流 + Emby API 访问都需要 client；
+         AirPlay/本地投屏回调需要 server。两者都属于"通用网络能力"，
+         未签名归档也能通过（不需要与 Provisioning Profile 绑定）。 -->
     <key>com.apple.security.network.client</key>
     <true/>
     <key>com.apple.security.network.server</key>
-    <true/>
-    <key>com.apple.developer.avfoundation.interactive-content-video-queue-scheduling</key>
     <true/>
 </dict>
 </plist>

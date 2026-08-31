@@ -61,6 +61,8 @@ jobs:
           submodules: recursive
 
       - name: 安装 XcodeGen
+        env:
+          HOMEBREW_NO_REQUIRE_TAP_TRUST: "1"
         run: |
           brew install xcodegen || true
           xcodegen --version || true
@@ -210,6 +212,8 @@ jobs:
             ${{ runner.os }}-spm-
 
       - name: 安装 xcbeautify
+        env:
+          HOMEBREW_NO_REQUIRE_TAP_TRUST: "1"
         run: brew install xcbeautify
 
       - name: 配置 Xcode

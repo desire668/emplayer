@@ -79,7 +79,7 @@ struct SearchView: View {
             debounceTask?.cancel()
             debounceTask = Task.detached {
                 do {
-                    try await Task.sleep(seconds: 0.35)
+                    try await sleepTask(seconds: 0.35)
                     if Task.isCancelled { return }
                     await MainActor.run { runSearch() }
                 } catch {}

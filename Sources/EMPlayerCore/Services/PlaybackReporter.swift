@@ -50,7 +50,7 @@ public final class PlaybackReporter: ObservableObject {
         // Start a 10s progress report timer
         timerTask = Task.detached { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(seconds: 10.0)
+                try? await sleepTask(seconds: 10.0)
                 guard let self = self else { break }
                 Task { @MainActor in
                     await self.reportProgressIfNeeded()

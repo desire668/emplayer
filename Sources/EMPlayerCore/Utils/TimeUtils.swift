@@ -108,8 +108,10 @@ public enum MediaTypeUtils {
     }
 }
 
-public extension Task where Success == Never, Failure == Never {
-    static func sleep(seconds: Double) async throws {
-        try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-    }
+/// Convenience wrapper for `Task.sleep(nanoseconds:)` that accepts seconds as `Double`.
+/// Works inside any `Task` / `Task.detached` closure without constrained generics.
+@inlinable
+public func sleepTask(seconds: Double) async throws {
+    let ns = UInt64(seconds * 1_000_000_000.0)
+    try await Task.sleep(nanoseconds: ns)
 }

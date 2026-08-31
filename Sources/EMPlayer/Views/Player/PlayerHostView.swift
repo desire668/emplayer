@@ -2,6 +2,7 @@ import SwiftUI
 import EMPlayerCore
 import KSPlayer
 import AVFoundation
+import UIKit
 
 // MARK: - Player Host (Handles context, navigation, Emby reporting)
 
@@ -23,8 +24,9 @@ struct PlayerHostView: View {
     @State private var playbackURL: URL?
     @State private var startSeconds: Double = 0
     @State private var playMode: PlayMode = .directStream
+    @State private var hasStartedReporter: Bool = false
     
-    @StateObject private var playerCoordinator = PlayerCoordinator()
+    @StateObject private var coordinator = PlayerCoordinator()
     
     enum PlayMode: String, CaseIterable, Identifiable {
         case directStream = "直连"
@@ -44,20 +46,21 @@ struct PlayerHostView: View {
     
     var body: some View {
         ZStack {
+            Color.black.ignoresSafeArea()
+            
             if isLoading {
                 loadingView
             } else if let url = playbackURL, let src = currentMediaSource {
                 GeometryReader { proxy in
-                    KSPlayerView(
+                    KSPlayerUIViewWrapper(
                         url: url,
                         mediaItem: item,
-                        mediaSource: src,
                         startSeconds: startSeconds,
-                        coordinator: playerCoordinator,
+                        coordinator: coordinator,
                         size: proxy.size
-                    ) { event in
-                        handlePlayerEvent(event, url: url, src: src)
-                    }
+                    )
+                    .ignoresSafeArea()
+                    .onAppear { ensureReporterStarted(src: src) }
                     .overlay(alignment: .top) {
                         if let msg = errorMsg {
                             Text(msg).font(.caption).foregroundStyle(.red).padding(6)
@@ -65,13 +68,11 @@ struct PlayerHostView: View {
                                 .padding()
                         }
                     }
-                    .onTapGesture {
-                        // Allow default KSPlayer controls, no-op here
-                    }
                     .overlay(alignment: .topLeading) {
                         Button {
-                            playerCoordinator.player?.pause()
+                            coordinator.pause()
                             PlaybackReporter.shared.stop(playedToCompletion: isPlayedToCompletion())
+                            hasStartedReporter = false
                             dismiss()
                         } label: {
                             Image(systemName: "chevron.down.circle.fill")
@@ -84,12 +85,23 @@ struct PlayerHostView: View {
                     .overlay(alignment: .topTrailing) {
                         topTrailingMenu
                     }
+                    .onChange(of: coordinator.currentTime) { _, newTime in
+                        if hasStartedReporter {
+                            PlaybackReporter.shared.updatePosition(newTime, isPaused: coordinator.isPaused)
+                        }
+                    }
+                    .onChange(of: coordinator.isPaused) { _, paused in
+                        if hasStartedReporter {
+                            PlaybackReporter.shared.togglePause(paused)
+                        }
+                    }
+                    .onChange(of: coordinator.state) { _, newState in
+                        handleState(newState)
+                    }
                 }
-                .ignoresSafeArea()
             } else {
                 ContentUnavailableView("无法播放", systemImage: "play.slash.fill", description: Text(errorMsg ?? "没有可用的播放源"))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(.black)
                     .overlay(alignment: .topLeading) {
                         Button { dismiss() } label: {
                             Image(systemName: "xmark.circle.fill").font(.title3)
@@ -106,10 +118,15 @@ struct PlayerHostView: View {
             let new = playlist[idx]
             item = new
             startTicks = new.playbackPositionTicks
+            hasStartedReporter = false
+            coordinator.reset()
             Task { await resolvePlayback() }
         }
         .onDisappear {
-            PlaybackReporter.shared.stop(playedToCompletion: isPlayedToCompletion())
+            if hasStartedReporter {
+                PlaybackReporter.shared.stop(playedToCompletion: isPlayedToCompletion())
+                hasStartedReporter = false
+            }
         }
     }
     
@@ -117,10 +134,8 @@ struct PlayerHostView: View {
         ZStack {
             Color.black.ignoresSafeArea()
             VStack(spacing: 16) {
-                ProgressView()
-                    .controlSize(.large)
-                Text("正在准备播放…")
-                    .font(.headline).foregroundStyle(.white)
+                ProgressView().controlSize(.large).tint(.white)
+                Text("正在准备播放…").font(.headline).foregroundStyle(.white)
                 Text(item.name).font(.subheadline).foregroundStyle(.secondary)
             }
             .overlay(alignment: .topLeading) {
@@ -158,6 +173,7 @@ struct PlayerHostView: View {
                 .onChange(of: playMode) { _, m in
                     if let src = currentMediaSource {
                         rebuildPlaybackURL(with: src, mode: m)
+                        coordinator.reset()
                     }
                 }
             }
@@ -167,10 +183,11 @@ struct PlayerHostView: View {
                         Button {
                             currentIndex = idx
                         } label: {
+                            let label = episodeLabel(it, idx: idx)
                             if idx == currentIndex {
-                                Label("\(String(format: "S%02dE%02d", it.parentIndexNumber ?? 0, it.indexNumber ?? idx+1)) \(it.name)", systemImage: "checkmark")
+                                Label(label, systemImage: "checkmark")
                             } else {
-                                Text("\(String(format: "S%02dE%02d", it.parentIndexNumber ?? 0, it.indexNumber ?? idx+1)) \(it.name)")
+                                Text(label)
                             }
                         }
                     }
@@ -185,7 +202,14 @@ struct PlayerHostView: View {
         }
     }
     
-    // MARK: - Resolve playback: fetch PlaybackInfo, build URL, start reporter
+    private func episodeLabel(_ it: MediaItem, idx: Int) -> String {
+        if let s = it.parentIndexNumber, let e = it.indexNumber {
+            return String(format: "S%02dE%02d %@", s, e, it.name)
+        }
+        return "\(idx + 1). \(it.name)"
+    }
+    
+    // MARK: - Resolve playback
     
     private func resolvePlayback() async {
         isLoading = true
@@ -194,10 +218,8 @@ struct PlayerHostView: View {
         currentMediaSource = nil
         
         do {
-            // Use existing media sources if available (preferred to save one API call)
             let info: PlaybackInfoResponse
             if let existing = item.mediaSources, !existing.isEmpty {
-                // still make request to get PlaySessionId
                 info = try await EmbyClient.shared.getPlaybackInfo(
                     itemId: item.id,
                     mediaSourceId: existing.first?.id,
@@ -217,22 +239,9 @@ struct PlayerHostView: View {
                 throw EmbyAPIError.serverError("服务器未返回任何可播放的媒体源")
             }
             currentMediaSource = source
-            
-            // Try direct stream first (best for KSPlayer, which has HW decoding)
             rebuildPlaybackURL(with: source, mode: playMode)
             
-            let ticks = startTicks
-            startSeconds = Double(ticks) / 10_000_000.0
-            
-            // Start Emby reporter
-            let sid = info.playSessionId ?? UUID().uuidString
-            await PlaybackReporter.shared.start(
-                item: item,
-                mediaSource: source,
-                playSessionId: sid,
-                startPositionTicks: ticks
-            )
-            
+            startSeconds = Double(startTicks) / 10_000_000.0
             isLoading = false
         } catch {
             errorMsg = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
@@ -243,13 +252,11 @@ struct PlayerHostView: View {
     private func rebuildPlaybackURL(with source: MediaSource, mode: PlayMode) {
         switch mode {
         case .directStream:
-            if source.supportsDirectStream, let u = EmbyClient.shared.directStreamURL(mediaSource: source) {
-                self.playbackURL = u
-            } else if let u = EmbyClient.shared.directStreamURL(mediaSource: source) {
-                self.playbackURL = u
-            } else {
-                fallthrough
-            }
+            self.playbackURL = EmbyClient.shared.directStreamURL(mediaSource: source) ?? EmbyClient.shared.hlsTranscodeURL(
+                mediaSource: source,
+                playSessionId: playSessionId ?? UUID().uuidString,
+                startTimeTicks: startTicks
+            )
         case .hlsTranscode:
             if source.supportsTranscoding, let sid = playSessionId {
                 self.playbackURL = EmbyClient.shared.hlsTranscodeURL(
@@ -258,285 +265,187 @@ struct PlayerHostView: View {
                     startTimeTicks: startTicks
                 )
             } else {
-                // Fallback
                 self.playbackURL = EmbyClient.shared.directStreamURL(mediaSource: source)
             }
         }
     }
     
-    // MARK: - Player events
+    private func ensureReporterStarted(src: MediaSource) {
+        guard !hasStartedReporter else { return }
+        hasStartedReporter = true
+        let sid = playSessionId ?? UUID().uuidString
+        Task {
+            await PlaybackReporter.shared.start(
+                item: item,
+                mediaSource: src,
+                playSessionId: sid,
+                startPositionTicks: startTicks
+            )
+        }
+    }
     
-    private func handlePlayerEvent(_ event: PlayerCoordinator.Event, url: URL, src: MediaSource) {
-        switch event {
-        case .stateChanged(let state):
-            switch state {
-            case .paused:
-                PlaybackReporter.shared.togglePause(true)
-            case .playing:
-                PlaybackReporter.shared.togglePause(false)
-            case .finished:
+    // MARK: - State handling
+    
+    private func handleState(_ state: PlayerCoordinator.StateEx) {
+        switch state {
+        case .error(let err):
+            errorMsg = "播放错误：\(err?.localizedDescription ?? "未知错误")"
+        case .finished:
+            if hasStartedReporter {
                 PlaybackReporter.shared.stop(playedToCompletion: true)
-                // Auto next in playlist
-                if currentIndex + 1 < playlist.count {
-                    currentIndex += 1
-                } else {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                        dismiss()
-                    }
-                }
-            case .error(let err):
-                errorMsg = "播放错误：\(err?.localizedDescription ?? "未知错误")"
-            default: break
+                hasStartedReporter = false
             }
-        case .progress(let cur, let total):
-            PlaybackReporter.shared.updatePosition(cur, isPaused: playerCoordinator.isPaused)
-        case .ready:
-            PlaybackReporter.shared.togglePause(playerCoordinator.isPaused)
-        case .buffering(_):
+            if currentIndex + 1 < playlist.count {
+                currentIndex += 1
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    dismiss()
+                }
+            }
+        case .paused, .playing, .ready, .buffering:
             break
         }
     }
     
     private func isPlayedToCompletion() -> Bool {
-        let total = playerCoordinator.totalDuration
-        let cur = playerCoordinator.currentTime
+        let total = coordinator.totalDuration
+        let cur = coordinator.currentTime
         if total <= 0 { return false }
         return cur > max(total - 15, total * 0.95)
     }
 }
 
-// MARK: - KSPlayer wrapper + event relay
+// MARK: - Coordinator
 
-/// Coordinator that observes KSPlayer's state and publishes SwiftUI-observable events.
 @MainActor
 final class PlayerCoordinator: ObservableObject {
-    enum Event {
-        case ready
-        case stateChanged(KSPlayerState)
-        case progress(current: Double, total: Double)
-        case buffering(progress: Double)
-    }
-    
-    enum KSPlayerState {
-        case idle, playing, paused, finished, error(Error?)
+    enum StateEx {
+        case ready, playing, paused, buffering, finished, error(Error?)
     }
     
     @Published var currentTime: Double = 0
     @Published var totalDuration: Double = 0
-    @Published var buffered: Double = 0
     @Published var isPaused: Bool = false
-    @Published var isMuted: Bool = false
+    @Published var state: StateEx = .ready
     
-    /// Closure set by parent to receive events
-    var onEvent: ((Event) -> Void)?
+    weak var playerView: KSPlayer.IOSVideoPlayerView?
     
-    /// Retain the underlying KSPlayer controller reference
-    weak var player: (any KSPlayerProtocol)?
+    func play() { playerView?.play() }
+    func pause() { playerView?.pause() }
+    func seek(to seconds: Double) { playerView?.seek(time: seconds, completionHandler: nil) }
     
-    func send(_ event: Event) {
-        onEvent?(event)
-        switch event {
-        case .progress(let c, let t):
-            currentTime = c; totalDuration = t
-        case .buffering(let b):
-            buffered = b
-        case .stateChanged(let s):
-            switch s {
-            case .paused: isPaused = true
-            case .playing: isPaused = false
-            case .error(_): break
-            default: break
-            }
-        default: break
-        }
+    func reset() {
+        currentTime = 0
+        totalDuration = 0
+        isPaused = false
+        state = .ready
     }
 }
 
-// MARK: - SwiftUI View that wraps KSVideoPlayerView
+// MARK: - IOSVideoPlayerView SwiftUI Wrapper (UIViewRepresentable)
 
-struct KSPlayerView: View {
+/// SwiftUI wrapper for the official KSPlayer `IOSVideoPlayerView` (UIKit).
+/// Uses the official callbacks: `playTimeDidChange`, `stateChanged`, `playDone`, etc.
+struct KSPlayerUIViewWrapper: UIViewRepresentable {
     let url: URL
     let mediaItem: MediaItem
-    let mediaSource: MediaSource
     let startSeconds: Double
     @ObservedObject var coordinator: PlayerCoordinator
     let size: CGSize
-    var onEvent: (PlayerCoordinator.Event) -> Void
     
-    @State private var options: KSOptions
-    @State private var initDone: Bool = false
-    
-    init(url: URL, mediaItem: MediaItem, mediaSource: MediaSource, startSeconds: Double, coordinator: PlayerCoordinator, size: CGSize, onEvent: @escaping (PlayerCoordinator.Event) -> Void) {
-        self.url = url
-        self.mediaItem = mediaItem
-        self.mediaSource = mediaSource
-        self.startSeconds = startSeconds
-        self.coordinator = coordinator
-        self.size = size
-        self.onEvent = onEvent
+    func makeUIView(context: Context) -> KSPlayer.IOSVideoPlayerView {
+        let player = KSPlayer.IOSVideoPlayerView()
         
-        // Build KSPlayer options tuned for iOS + Emby
-        var opts = KSOptions()
-        opts.isAutoPlay = true
-        opts.preferredForwardBufferDuration = 30
-        opts.maxBufferDuration = 60
-        opts.minBufferDuration = 2
-        opts.maxReadInterval = 2.0
-        // Hardware decoding for H.264 / HEVC; software for AV1/VP9
-        opts.videoDisableVideoToolbox = false
-        opts.videoToolboxH264 = true
-        opts.videoToolboxH265 = true
-        // Allow KSPlayer to pick best codec
-        opts.codecLiveVideoCheckTimestamp = true
-        // Disable background playback pause; we handle audio category ourselves
-        opts.pauseWhenAppResignActive = false
-        // Resume time
-        opts.startPlayTime = max(0, startSeconds)
-        // Audio channel layout — passthrough when possible
-        opts.audioDesiredSpacial = true
-        self._options = State(initialValue: opts)
-    }
-    
-    var body: some View {
-        KSVideoPlayerView(
+        // ==== 构建 KSOptions（只用官方文档确认存在的 API）====
+        let options = KSOptions()
+        options.hardwareDecode = true
+        options.preferredForwardBufferDuration = 30
+        options.maxBufferDuration = 60
+        options.isSecondOpen = true
+        options.isAccurateSeek = true
+        options.startPlayTime = max(0, startSeconds)
+        options.autoSelectEmbedSubtitle = true
+        options.asynchronousDecompression = true
+        
+        // 构造 Emby 自定义 User-Agent + 鉴权头（防止部分服务器拒绝）
+        if let token = EmbyClient.shared.accessToken ?? EmbyClient.shared.currentServer?.apiKey {
+            options.userAgent = "EMPlayer/1.0 (iOS) X-MediaBrowser-Token/\(token)"
+            options.avOptions = [
+                "AVURLAssetHTTPHeaderFieldsKey": [
+                    "User-Agent": "EMPlayer/1.0 iOS",
+                    "X-Emby-Token": token
+                ]
+            ] as [String: Any]
+        }
+        
+        // ==== 构造 KSPlayerResource（支持多种清晰度/子轨）====
+        let coverURL = EmbyClient.shared.primaryImageURL(for: mediaItem, maxWidth: 400)
+        let def = KSPlayerResourceDefinition(
             url: url,
+            definition: mediaItem.name,
             options: options
         )
-        // Observe callbacks via preference / delegate attachment in .task
-        .background(KSPlayerBridge(
-            url: url,
-            mediaItem: mediaItem,
-            mediaSource: mediaSource,
-            coordinator: coordinator,
-            onEvent: onEvent
-        ))
-        .background(Color.black)
-        .onAppear {
-            if !initDone {
-                initDone = true
-                coordinator.onEvent = onEvent
-            }
-        }
-        .onChange(of: coordinator.onEvent) { _, newValue in
-            // Ensure onEvent is attached when parent updates
-            coordinator.onEvent = newValue
-        }
-    }
-}
-
-// MARK: - KSPlayer Delegate Bridge (NSObject-based)
-
-/// Uses KSOptions' closures / Notifications or accesses underlying player to feed coordinator events.
-/// KSPlayer 0.6 exposes: `KSVideoPlayerView(url:options:)` creates `KSAVPlayer` internally,
-/// and a `KSPlayerLayerView` with a delegate we can attach.
-/// We fall back to Timer-based progress polling from `KSVideoPlayer` state if delegate not exposed.
-struct KSPlayerBridge: UIViewControllerRepresentable {
-    let url: URL
-    let mediaItem: MediaItem
-    let mediaSource: MediaSource
-    let coordinator: PlayerCoordinator
-    let onEvent: (PlayerCoordinator.Event) -> Void
-    
-    func makeUIViewController(context: Context) -> UIViewController {
-        let vc = UIViewController()
-        vc.view.backgroundColor = .clear
-        // Start a periodic task to poll KSPlayer state through NotificationCenter
-        // and any public player reference we can grab.
-        context.coordinator.startMonitoring(
-            for: url,
-            coordinator: coordinator,
-            onEvent: onEvent
+        let resource = KSPlayerResource(
+            name: mediaItem.name,
+            definitions: [def],
+            cover: coverURL
         )
-        return vc
-    }
-    
-    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
-    
-    func makeCoordinator() -> BridgeCoordinator {
-        BridgeCoordinator()
-    }
-    
-    // The internal poller reads from KSPlayer's public `KSPlayer.currentPlayer` / Notifications.
-    final class BridgeCoordinator: NSObject {
-        private var pollTask: Task<Void, Never>?
-        private var lastFiredFinished: Bool = false
         
-        deinit {
-            pollTask?.cancel()
-        }
+        // ==== 注册回调 ====
+        context.coordinator.boundPlayerView = player
+        context.coordinator.outerCoordinator = coordinator
         
-        func startMonitoring(for url: URL, coordinator: PlayerCoordinator, onEvent: @escaping (PlayerCoordinator.Event) -> Void) {
-            pollTask?.cancel()
-            lastFiredFinished = false
-            
-            // Use NotificationCenter-based events exposed by KSPlayer where possible
-            let nc = NotificationCenter.default
-            var tokens: [NSObjectProtocol] = []
-            
-            tokens.append(nc.addObserver(forName: .KSPlayerStateChanged, object: nil, queue: .main) { note in
-                guard let obj = note.object, (obj as AnyObject).url == url as NSURL else { return }
-                guard let state = note.userInfo?["state"] as? Int else { return }
-                switch state {
-                case 1: // ready to play
-                    onEvent(.ready)
-                    coordinator.send(.ready)
-                case 2: // playing
-                    onEvent(.stateChanged(.playing))
-                    coordinator.send(.stateChanged(.playing))
-                case 3: // paused
-                    onEvent(.stateChanged(.paused))
-                    coordinator.send(.stateChanged(.paused))
-                case 5: // finished
-                    onEvent(.stateChanged(.finished))
-                    coordinator.send(.stateChanged(.finished))
-                case 6: // error
-                    let err = note.userInfo?["error"] as? Error
-                    onEvent(.stateChanged(.error(err)))
-                    coordinator.send(.stateChanged(.error(err)))
-                default: break
-                }
-            })
-            
-            tokens.append(nc.addObserver(forName: .KSPlayerTimeChanged, object: nil, queue: .main) { note in
-                guard let cur = note.userInfo?["currentTime"] as? Double,
-                      let total = note.userInfo?["totalTime"] as? Double else { return }
-                onEvent(.progress(current: cur, total: total))
-                coordinator.send(.progress(current: cur, total: total))
-            })
-            
-            tokens.append(nc.addObserver(forName: .KSPlayerBufferChanged, object: nil, queue: .main) { note in
-                guard let buf = note.userInfo?["loadedTime"] as? Double else { return }
-                onEvent(.buffering(progress: buf))
-                coordinator.send(.buffering(progress: buf))
-            })
-            
-            // Fallback polling (keeps progress reporter working even if notifications miss)
-            pollTask = Task.detached { [weak self] in
-                while !Task.isCancelled {
-                    try? await Task.sleep(seconds: 1.0)
-                    await MainActor.run {
-                        guard self?.lastFiredFinished == false else { return }
-                        // Try to read any KSPlayer globals for the URL
-                        // If we can get duration/current, use them; otherwise rely on notifications.
-                        // For reliability, we keep forward-progress-only semantics: update reporter
-                        // with last known values from notifications.
-                    }
-                }
-                for t in tokens { nc.removeObserver(t) }
+        player.playTimeDidChange = { current, total in
+            Task { @MainActor in
+                context.coordinator.outerCoordinator?.currentTime = current
+                context.coordinator.outerCoordinator?.totalDuration = total
             }
         }
+        player.playerStateChange = { _, newState in
+            Task { @MainActor in
+                switch newState {
+                case .playback:
+                    context.coordinator.outerCoordinator?.state = .playing
+                    context.coordinator.outerCoordinator?.isPaused = false
+                case .paused, .loading:
+                    if case .loading = newState {
+                        context.coordinator.outerCoordinator?.state = .buffering
+                    } else {
+                        context.coordinator.outerCoordinator?.state = .paused
+                        context.coordinator.outerCoordinator?.isPaused = true
+                    }
+                case .readyToPlay:
+                    context.coordinator.outerCoordinator?.state = .ready
+                case .bufferFinished:
+                    break
+                case .playedToTheEnd:
+                    context.coordinator.outerCoordinator?.state = .finished
+                case .error(let err):
+                    context.coordinator.outerCoordinator?.state = .error(err)
+                @unknown default:
+                    break
+                }
+            }
+        }
+        
+        player.set(resource: resource)
+        player.play()
+        coordinator.playerView = player
+        
+        return player
     }
-}
-
-// MARK: - NSNotification names used by KSPlayer (if these change in future KS, user can update)
-extension Notification.Name {
-    static let KSPlayerStateChanged = Notification.Name(rawValue: "KSPlayerStateChanged")
-    static let KSPlayerTimeChanged = Notification.Name(rawValue: "KSPlayerTimeChanged")
-    static let KSPlayerBufferChanged = Notification.Name(rawValue: "KSPlayerBufferChanged")
-    static let KSPlayerDurationChanged = Notification.Name(rawValue: "KSPlayerDurationChanged")
-}
-
-// Helper: compare URL equality ignoring query ordering
-private extension AnyObject {
-    var url: NSURL? { nil }
+    
+    func updateUIView(_ uiView: KSPlayer.IOSVideoPlayerView, context: Context) {
+        // no-op for now
+    }
+    
+    func makeCoordinator() -> InnerCoordinator {
+        InnerCoordinator()
+    }
+    
+    // Inner coordinator keeps a strong reference to bridge closures from being recycled
+    final class InnerCoordinator {
+        weak var boundPlayerView: KSPlayer.IOSVideoPlayerView?
+        weak var outerCoordinator: PlayerCoordinator?
+    }
 }

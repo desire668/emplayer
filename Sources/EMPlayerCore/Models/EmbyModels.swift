@@ -136,7 +136,7 @@ public struct MediaItem: Codable, Identifiable, Equatable, Hashable {
     public let album: String?
     public let artists: [String]?
     public let imageTags: ImageTags?
-    public let backdropImageTags: [ImageTag]?
+    public let backdropImageTags: [String]?
     public let userData: UserData?
     public let locationType: String?
     public let videoType: String?

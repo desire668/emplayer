@@ -590,7 +590,7 @@ extension EmbyClient {
     public func backdropURL(for item: MediaItem, index: Int = 0, maxWidth: Int = 1920) -> URL? {
         let tags = item.backdropImageTags ?? []
         guard index < tags.count else { return nil }
-        let tag = tags[index].imageTag
+        let tag = tags[index]
         return imageURL(itemId: item.id, tag: tag, type: "Backdrop", maxWidth: maxWidth)
     }
     

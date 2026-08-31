@@ -71,7 +71,7 @@ targets:
 packages:
   KSPlayer:
     url: https://github.com/kingslay/KSPlayer.git
-    majorVersion: 0.6.0
+    branch: main
   KeychainSwift:
     url: https://github.com/evgenyneu/keychain-swift.git
     from: 20.0.0

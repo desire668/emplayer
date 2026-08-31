@@ -93,7 +93,7 @@ struct SettingsView: View {
                     }
                 }
                 
-                Section("关于") {
+                Section {
                     LabeledContent("应用名称", value: "EMPlayer")
                     LabeledContent("版本", value: appVersion)
                     LabeledContent("播放内核", value: "KSPlayer")
@@ -103,6 +103,8 @@ struct SettingsView: View {
                     Link(destination: URL(string: "https://emby.media/")!) {
                         Label("Emby 官网", systemImage: "safari")
                     }
+                } header: {
+                    Text("关于")
                 } footer: {
                     Text("© 2025 EMPlayer · 基于 KSPlayer 与 Emby API 构建")
                 }

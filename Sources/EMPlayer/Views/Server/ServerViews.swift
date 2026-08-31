@@ -23,14 +23,14 @@ struct ServerAddView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section(header: Text("服务器信息")) {
+                Section {
                     HStack {
                         Label("名称", systemImage: "server.rack")
                         TextField("我的 Emby 服务器", text: $name)
                             .multilineTextAlignment(.trailing)
                             .autocorrectionDisabled()
                     }
-                    
+
                     HStack {
                         Label("地址", systemImage: "network")
                         TextField("http://192.168.1.100:8096", text: $host)
@@ -39,13 +39,15 @@ struct ServerAddView: View {
                             .autocorrectionDisabled()
                             .multilineTextAlignment(.trailing)
                     }
-                    
+
                     HStack {
                         Label("API Key", systemImage: "key")
                         SecureField("可选", text: $apiKey)
                             .autocapitalization(.none)
                             .multilineTextAlignment(.trailing)
                     }
+                } header: {
+                    Text("服务器信息")
                 } footer: {
                     Text("地址示例：\n• http://192.168.1.100:8096\n• https://emby.example.com\nAPI Key 在服务器管理面板 → 高级 → API密钥 中生成。不填时使用用户名密码登录。")
                         .font(.footnote)

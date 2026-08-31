@@ -479,7 +479,7 @@ public struct DeviceProfile: Codable {
             ],
             transcodingProfiles: [
                 TranscodingProfile(container: "ts", type: "Video", videoCodec: "h264", audioCodec: "aac", protocol: "hls", estimateContentLength: false, enableMpegtsM2TsMode: true, transcodeSeekInfo: "Auto", copyTimestamps: true, context: "Streaming", maxAudioChannels: "8", minSegments: 1, segmentLength: 0, breakOnNonKeyFrames: true),
-                TranscodingProfile(container: "mp4", type: "Video", videoCodec: "h264", audioCodec: "aac", protocol: "http", context: "Static", maxAudioChannels: "8", optimizeForWebStreaming: true, breakOnNonKeyFrames: false),
+                TranscodingProfile(container: "mp4", type: "Video", videoCodec: "h264", audioCodec: "aac", protocol: "http", context: "Static", maxAudioChannels: "8", breakOnNonKeyFrames: false, optimizeForWebStreaming: true),
                 TranscodingProfile(container: "mp3", type: "Audio", audioCodec: "mp3", protocol: "http", context: "Streaming", maxAudioChannels: "2"),
                 TranscodingProfile(container: "aac", type: "Audio", audioCodec: "aac", protocol: "http", context: "Streaming", maxAudioChannels: "2"),
                 TranscodingProfile(container: "wav", type: "Audio", audioCodec: "pcm_s16le", protocol: "http", context: "Streaming", maxAudioChannels: "8")

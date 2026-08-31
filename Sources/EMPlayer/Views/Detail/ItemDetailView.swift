@@ -91,7 +91,7 @@ struct ItemDetailView: View {
                 .environmentObject(appState)
         }
         .task(id: item.id) { await loadFull() }
-        .onChange(of: playerContext) { _, new in
+        .onChange(of: playerContext?.item.id) { _, new in
             if new == nil {
                 // Player dismissed — refresh item (watched state etc.)
                 Task { await loadFull() }
@@ -501,7 +501,7 @@ struct ItemDetailView: View {
         do {
             let info = try await EmbyClient.shared.getPlaybackInfo(itemId: it.id, startTimeTicks: startTicks)
             if info.mediaSources.isEmpty {
-                appState.errorMessage = "无可播放的媒体源"
+                appState.handleError(EmbyAPIError.serverError("无可播放的媒体源"), fallback: "无可播放的媒体源")
                 return
             }
             var updated = it

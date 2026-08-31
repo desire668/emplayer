@@ -49,7 +49,7 @@ struct HomeView: View {
                 } else {
                     LazyVStack(alignment: .leading, spacing: 24, pinnedViews: [.sectionHeaders]) {
                         Section {
-                            PosterRow(items: resume, useBackdrop: false, showPlayedBadge: true) { item in
+                            PosterRow(items: resume, useBackdrop: false) { item in
                                 ResumeCard(item: item)
                             } emptyView: {
                                 EmptyHint(label: "还没有继续观看的内容", systemImage: "play.circle")
@@ -369,9 +369,9 @@ struct KFPosterImage: View {
                 KFImage(url)
                     .placeholder({ _ in placeholderView })
                     .resizable()
-                    .aspectRatio(contentMode: contentMode)
                     .fade(duration: 0.25)
                     .diskCacheExpiration(.days(14))
+                    .aspectRatio(contentMode: contentMode)
             } else {
                 placeholderView
             }

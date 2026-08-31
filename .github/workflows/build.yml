@@ -274,6 +274,11 @@ jobs:
 
       - name: 注入版本号
         run: |
+          # 关键：device job 是全新 runner（checkout + 下载的 xcode-project
+          # artifact 里不含 Build/ 目录），必须先建目录，否则下面的
+          # `> Build/Version.xcconfig` 重定向会报
+          # "Build/Version.xcconfig: No such file or directory" 直接失败。
+          mkdir -p Build
           VERSION="${{ needs.generate-project.outputs.version }}"
           BUILD="${{ needs.generate-project.outputs.build }}"
           echo "MARKETING_VERSION=${VERSION}" > Build/Version.xcconfig

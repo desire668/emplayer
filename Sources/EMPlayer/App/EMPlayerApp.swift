@@ -4,7 +4,8 @@ import Kingfisher
 import EMPlayerCore
 
 /// Kingfisher 图片加载的 SSL 挑战响应：当前服务器开启「跳过 SSL 验证」时信任自签名证书
-final class EmbyImageAuthChallenge: NSObject, AuthenticationChallengeResponder {
+/// 注意：Kingfisher 7.x 协议名为 AuthenticationChallengeResponsible（旧 typo 名 Responsable 已废弃）
+final class EmbyImageAuthChallenge: NSObject, AuthenticationChallengeResponsible {
     func downloader(_ downloader: ImageDownloader,
                     didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {

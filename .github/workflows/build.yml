@@ -328,18 +328,21 @@ jobs:
           if [ "${SIGN}" == "true" ]; then
             XCODEBUILD_ARGS+=(-xcconfig "Build/Sign.xcconfig")
           else
-            # 无签名真机构建：关闭签名 + ad-hoc 兜底（SPM 动态框架嵌入时
-            # 仍可能触发 codesign，用 "-" 身份做 ad-hoc 签名比完全禁用更稳）。
-            # 注意：不要传伪造的 codesign 参数（codesign 没有 skip-code-signature）。
+            # 无签名真机构建：完全关闭代码签名。
+            # 注意：不能用 ad-hoc（CODE_SIGN_IDENTITY="-"），
+            # Xcode 16+ / iOS 26 SDK 会报
+            # "Ad Hoc code signing is not allowed with SDK 'iOS 26.x'"，
+            # 主 target 和所有 SPM 包（KSPlayer/Kingfisher/FFmpegKit 等）全部中招。
+            # CODE_SIGNING_ALLOWED=NO 只编译链接不签名，.app 照产出，
+            # 后续手动打 unsigned IPA + 用户本地重签即可。
             XCODEBUILD_ARGS+=(
-              CODE_SIGNING_ALLOWED=YES
+              CODE_SIGNING_ALLOWED=NO
               CODE_SIGNING_REQUIRED=NO
-              CODE_SIGN_IDENTITY="-"
+              CODE_SIGN_IDENTITY=""
               CODE_SIGN_ENTITLEMENTS=""
               DEVELOPMENT_TEAM=""
               PROVISIONING_PROFILE_SPECIFIER=""
               PROVISIONING_PROFILE=""
-              PROVISIONING_STYLE=Automatic
             )
           fi
 
@@ -386,17 +389,16 @@ jobs:
           if [ "${SIGN}" == "true" ]; then
             EXTRA_ARGS+=(-xcconfig "Build/Sign.xcconfig")
           else
-            # 无签名 archive：ad-hoc 身份签名（比完全禁用签名更容易通过
-            # archive 阶段的嵌入框架 codesign 检查），后续手动导出 IPA
-            # 前会 strip 掉 _CodeSignature，不影响用户本地重签。
-            EXTRA_ARGS+=(CODE_SIGNING_ALLOWED=YES)
+            # 无签名 archive：完全关闭代码签名（不能用 ad-hoc，
+            # Xcode 16+ / iOS 26 SDK 禁止 ad-hoc 设备签名）。
+            # 失败也没关系（continue-on-error），会走手动构造 xcarchive。
+            EXTRA_ARGS+=(CODE_SIGNING_ALLOWED=NO)
             EXTRA_ARGS+=(CODE_SIGNING_REQUIRED=NO)
-            EXTRA_ARGS+=(CODE_SIGN_IDENTITY="-")
+            EXTRA_ARGS+=(CODE_SIGN_IDENTITY="")
             EXTRA_ARGS+=(CODE_SIGN_ENTITLEMENTS="")
             EXTRA_ARGS+=(DEVELOPMENT_TEAM="")
             EXTRA_ARGS+=(PROVISIONING_PROFILE_SPECIFIER="")
             EXTRA_ARGS+=(PROVISIONING_PROFILE="")
-            EXTRA_ARGS+=(PROVISIONING_STYLE=Automatic)
           fi
           if [ -f Build/Version.xcconfig ]; then
             EXTRA_ARGS+=(-xcconfig "Build/Version.xcconfig")

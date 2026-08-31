@@ -564,7 +564,7 @@ extension EmbyClient {
         guard let server = currentServer else { return nil }
         guard let tag = tag, !tag.isEmpty else { return nil }
         let base = server.baseURL()
-        var path = "/emby/Items/\(itemId)/Images/\(type)/\(tag)"
+        let path = "/emby/Items/\(itemId)/Images/\(type)/\(tag)"
         var queryParts: [String] = []
         if let w = width { queryParts.append("Width=\(w)") }
         if let h = height { queryParts.append("Height=\(h)") }

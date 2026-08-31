@@ -2,7 +2,7 @@ name: EMPlayer
 options:
   bundleIdPrefix: com.emplayer
   deploymentTarget:
-    iOS: "15.0"
+    iOS: "17.0"
   createIntermediateGroups: true
   xcodeVersion: "15.0"
   findCarthageFrameworks: false

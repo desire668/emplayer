@@ -1,4 +1,5 @@
 import SwiftUI
+import EMPlayerCore
 
 /// The root view that decides which screen to show based on auth state.
 struct RootView: View {

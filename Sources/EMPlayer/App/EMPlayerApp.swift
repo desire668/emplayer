@@ -1,4 +1,5 @@
 import SwiftUI
+import EMPlayerCore
 
 @main
 struct EMPlayerApp: App {

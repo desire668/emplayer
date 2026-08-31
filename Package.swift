@@ -8,7 +8,7 @@ let package = Package(
     name: "EMPlayerCore",
     defaultLocalization: "en",
     platforms: [
-        .iOS(.v15)
+        .iOS(.v17)
     ],
     products: [
         // 主产物：EMPlayerCore library（project.yml 里 package: EMPlayerCore 找的就是这个）

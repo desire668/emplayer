@@ -228,24 +228,30 @@ public final class EmbyClient {
 
 extension EmbyClient {
     /// Get public server info without authentication.
-    /// - Parameter baseURL: 完整基础地址（含协议/端口/子路径）
-    public func getPublicSystemInfo(baseURL: String) async throws -> PublicSystemInfo {
+    /// - Parameters:
+    ///   - baseURL: 完整基础地址（含协议/端口/子路径）
+    ///   - skipSSL: 是否信任自签名证书
+    public func getPublicSystemInfo(baseURL: String, skipSSL: Bool = false) async throws -> PublicSystemInfo {
         guard let temp = EmbyServer(baseURLString: baseURL) else { throw EmbyAPIError.invalidURL }
         let savedServer = currentServer
         defer { currentServer = savedServer }
 
         currentServer = temp
+        currentServer?.skipSSL = skipSSL
         return try await request(method: "GET", path: "/emby/System/Info/Public")
     }
 
     /// Get public users on server (for login screen user picker).
-    /// - Parameter baseURL: 完整基础地址（含协议/端口/子路径）
-    public func getPublicUsers(baseURL: String) async throws -> [EmbyUser] {
+    /// - Parameters:
+    ///   - baseURL: 完整基础地址（含协议/端口/子路径）
+    ///   - skipSSL: 是否信任自签名证书
+    public func getPublicUsers(baseURL: String, skipSSL: Bool = false) async throws -> [EmbyUser] {
         guard let temp = EmbyServer(baseURLString: baseURL) else { throw EmbyAPIError.invalidURL }
         let savedServer = currentServer
         defer { currentServer = savedServer }
 
         currentServer = temp
+        currentServer?.skipSSL = skipSSL
         let result: QueryResult<EmbyUser> = try await request(
             method: "GET",
             path: "/emby/Users/Public"

@@ -41,7 +41,7 @@ public final class AppState: ObservableObject {
                 user = try await EmbyClient.shared.getCurrentUser()
             } else {
                 // 旧数据可能缺 userId：拉取公开用户取第一个（多数家用服务器即本人账号）
-                let users = try await EmbyClient.shared.getPublicUsers(baseURL: server.baseURL())
+                let users = try await EmbyClient.shared.getPublicUsers(baseURL: server.baseURL(), skipSSL: server.skipSSL)
                 guard let first = users.first else {
                     isLoggedIn = false
                     return
@@ -67,12 +67,11 @@ public final class AppState: ObservableObject {
     public func configureServer(_ server: EmbyServer, username: String, password: String) async throws -> EmbyServer {
         let trimmedUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // 1. 探测服务器（顺便取真实服务器名）
-        let info = try? await EmbyClient.shared.getPublicSystemInfo(baseURL: server.baseURL())
+        // 1. 探测服务器（顺便取真实服务器名；失败不阻塞登录）
+        let info = try? await EmbyClient.shared.getPublicSystemInfo(baseURL: server.baseURL(), skipSSL: server.skipSSL)
 
-        // 2. 用户名密码登录
+        // 2. 用户名密码登录（login 内部会临时切换 currentServer，结束时还原）
         let auth = try await EmbyClient.shared.login(server: server, username: trimmedUser, password: password)
-        EmbyClient.shared.setAuth(user: auth.user, accessToken: auth.accessToken)
 
         var saved = server
         if saved.name.isEmpty {
@@ -82,6 +81,11 @@ public final class AppState: ObservableObject {
         saved.userId = auth.user.id
         saved.accessToken = auth.accessToken
         saved.lastConnected = Date()
+
+        // 3. 关键：login() 返回时会还原 currentServer，必须显式把客户端
+        //    切到已登录的服务器，否则后续 API 会打到旧服务器/空地址
+        EmbyClient.shared.setServer(saved)
+        EmbyClient.shared.setAuth(user: auth.user, accessToken: auth.accessToken)
 
         ServerStore.shared.add(server: saved)
         ServerStore.shared.setActive(server: saved)

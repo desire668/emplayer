@@ -90,7 +90,8 @@ struct ServerAddView: View {
 
                 // MARK: 用户名 / 密码
                 Section {
-                    fieldRow(label: "用户名", placeholder: "用户名（必填）", text: $username, keyboard: .username)
+                    fieldRow(label: "用户名", placeholder: "用户名（必填）", text: $username, keyboard: .asciiCapable)
+                        .textContentType(.username)
                     HStack {
                         Text("密码")
                         Spacer()
@@ -102,6 +103,7 @@ struct ServerAddView: View {
                             }
                         }
                         .multilineTextAlignment(.trailing)
+                        .textContentType(.password)
                         Button {
                             showPassword.toggle()
                         } label: {
@@ -175,7 +177,7 @@ struct ServerAddView: View {
             Spacer()
             TextField(placeholder, text: text)
                 .keyboardType(keyboard)
-                .autocapitalization(.none)
+                .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .multilineTextAlignment(.trailing)
         }
@@ -459,7 +461,7 @@ struct ServerEditView: View {
                         Spacer()
                         TextField("主机（必填）", text: $host)
                             .keyboardType(.URL)
-                            .autocapitalization(.none)
+                            .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .multilineTextAlignment(.trailing)
                     }
@@ -468,7 +470,7 @@ struct ServerEditView: View {
                         Spacer()
                         TextField("路径（可选）", text: $path)
                             .keyboardType(.URL)
-                            .autocapitalization(.none)
+                            .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .multilineTextAlignment(.trailing)
                     }

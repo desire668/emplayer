@@ -78,7 +78,7 @@ struct LoginView: View {
                     HStack {
                         Label("用户名", systemImage: "person")
                         TextField("用户名", text: $username)
-                            .autocapitalization(.none)
+                            .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     }
                 }
@@ -120,7 +120,7 @@ struct LoginView: View {
             fetched = true
             if !publicUsers.isEmpty { return }
             do {
-                let users = try await EmbyClient.shared.getPublicUsers(baseURL: server.baseURL())
+                let users = try await EmbyClient.shared.getPublicUsers(baseURL: server.baseURL(), skipSSL: server.skipSSL)
                 publicUsers = users
                 if let first = users.first {
                     selectedUserId = first.id
@@ -155,7 +155,7 @@ struct LoginView: View {
             saved.username = username
             saved.lastConnected = Date()
             if saved.name.isEmpty {
-                saved.name = (try? await EmbyClient.shared.getPublicSystemInfo(baseURL: server.baseURL()).serverName) ?? "Emby Server"
+                saved.name = (try? await EmbyClient.shared.getPublicSystemInfo(baseURL: server.baseURL(), skipSSL: server.skipSSL).serverName) ?? "Emby Server"
             }
             onSuccess(saved)
         } catch {

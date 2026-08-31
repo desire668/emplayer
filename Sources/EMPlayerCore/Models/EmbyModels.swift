@@ -140,7 +140,7 @@ public struct MediaItem: Codable, Identifiable, Equatable, Hashable {
     public let userData: UserData?
     public let locationType: String?
     public let videoType: String?
-    public let mediaSources: [MediaSource]?
+    public var mediaSources: [MediaSource]?
     public let mediaStreams: [MediaStream]?
     public let genres: [String]?
     public let studios: [NameIdPair]?

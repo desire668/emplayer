@@ -1,4 +1,5 @@
 import SwiftUI
+import AVFoundation
 import EMPlayerCore
 
 @main
@@ -17,7 +18,7 @@ struct EMPlayerApp: App {
         
         // Background audio category (even when app is in background)
         do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, policy: .longFormAudio, options: [.allowBluetooth, .allowBluetoothA2DP, .allowAirPlay])
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, policy: .longFormAudio, options: [.allowBluetoothHFP, .allowBluetoothA2DP, .allowAirPlay])
             try AVAudioSession.sharedInstance().setActive(true, options: .notifyOthersOnDeactivation)
         } catch {
             print("[App] Audio session init error: \(error)")
@@ -42,5 +43,3 @@ struct EMPlayerApp: App {
         }
     }
 }
-
-import AVFoundation

@@ -505,8 +505,7 @@ struct ItemDetailView: View {
                 return
             }
             var updated = it
-            let keyPath = \MediaItem.mediaSources
-            updated[keyPath: keyPath] = info.mediaSources
+            updated.mediaSources = info.mediaSources
             fullItem = updated
             playerContext = .init(item: updated, startTicks: startTicks)
         } catch {

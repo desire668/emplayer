@@ -288,63 +288,84 @@ jobs:
         env:
           SIGN: ${{ steps.secrets-check.outputs.has_team }}
         run: |
+          set +e
           CFG="${{ steps.config.outputs.config }}"
-          EXTRA_ARGS=()
-          if [ "${SIGN}" == "true" ]; then
-            EXTRA_ARGS+=(-xcconfig "Build/Sign.xcconfig")
-          else
-            # 无签名归档：完整关闭所有 code signing + 禁用 entitlements 校验
-            EXTRA_ARGS+=(CODE_SIGNING_ALLOWED=NO)
-            EXTRA_ARGS+=(CODE_SIGNING_REQUIRED=NO)
-            EXTRA_ARGS+=(ENFORCE_CODE_SIGNING_WHILE_ARCHIVING=NO)
-            EXTRA_ARGS+=(ENTITLEMENTS_REQUIRED=NO)
-            EXTRA_ARGS+=(CODE_SIGN_IDENTITY="")
-            EXTRA_ARGS+=(CODE_SIGNING_ENTITLEMENTS="")
-            EXTRA_ARGS+=(PROVISIONING_PROFILE_SPECIFIER="")
-            EXTRA_ARGS+=(PROVISIONING_PROFILE="")
-            EXTRA_ARGS+=(DEVELOPMENT_TEAM="")
-            EXTRA_ARGS+=(EXPANDED_CODE_SIGN_IDENTITY="")
-            EXTRA_ARGS+=(EXPANDED_CODE_SIGN_IDENTITY_NAME="")
-            EXTRA_ARGS+=(OTHER_CODE_SIGN_FLAGS="--skip-code-signature")
-          fi
+          APP_NAME="${{ env.APP_NAME }}"
+          mkdir -p Build
+          LOG_FILE="Build/build-device.log"
+
+          # 把失败日志写入 GITHUB_STEP_SUMMARY（该内容不随长日志被截断，
+          # 即使没有 raw log 查看权限也能在 run 摘要里看到真实错误）
+          dump_fail_summary() {
+            {
+              echo ""
+              echo "### ❌ iOS 真机 ${CFG} 构建失败 — 构建日志尾部"
+              echo '```'
+              tail -n 250 "${LOG_FILE}" 2>/dev/null || echo "(日志文件不存在)"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          XCODEBUILD_ARGS=(
+            -project "${APP_NAME}.xcodeproj"
+            -scheme "${APP_NAME}"
+            -configuration "${CFG}"
+            -sdk iphoneos
+            -destination 'generic/platform=iOS'
+            -derivedDataPath DerivedData
+            -scmProvider system
+          )
+
           if [ -f Build/Version.xcconfig ]; then
-            EXTRA_ARGS+=(-xcconfig "Build/Version.xcconfig")
+            XCODEBUILD_ARGS+=(-xcconfig "Build/Version.xcconfig")
           fi
 
-          set +e
-          LOG_FILE="Build/build-device.log"
-          mkdir -p Build
-          xcodebuild \
-            -project "${{ env.APP_NAME }}.xcodeproj" \
-            -scheme "${{ env.APP_NAME }}" \
-            -configuration "${CFG}" \
-            -sdk iphoneos \
-            -derivedDataPath DerivedData \
-            -scmProvider system \
-            -quiet \
-            "${EXTRA_ARGS[@]}" \
-            build 2>&1 | tee "${LOG_FILE}" | xcbeautify --renderer github-actions
+          if [ "${SIGN}" == "true" ]; then
+            XCODEBUILD_ARGS+=(-xcconfig "Build/Sign.xcconfig")
+          else
+            # 无签名真机构建：关闭签名 + ad-hoc 兜底（SPM 动态框架嵌入时
+            # 仍可能触发 codesign，用 "-" 身份做 ad-hoc 签名比完全禁用更稳）。
+            # 注意：不要传伪造的 codesign 参数（codesign 没有 skip-code-signature）。
+            XCODEBUILD_ARGS+=(
+              CODE_SIGNING_ALLOWED=YES
+              CODE_SIGNING_REQUIRED=NO
+              CODE_SIGN_IDENTITY="-"
+              CODE_SIGN_ENTITLEMENTS=""
+              DEVELOPMENT_TEAM=""
+              PROVISIONING_PROFILE_SPECIFIER=""
+              PROVISIONING_PROFILE=""
+              PROVISIONING_STYLE=Automatic
+            )
+          fi
+
+          xcodebuild "${XCODEBUILD_ARGS[@]}" build 2>&1 | tee "${LOG_FILE}" | xcbeautify --renderer github-actions
           RC=${PIPESTATUS[0]}
-          set -e
 
           echo "xcodebuild build 返回码: ${RC}"
+          if [ "${RC}" -ne 0 ]; then
+            echo "::error::真机 ${CFG} 构建失败，详见步骤摘要（GITHUB_STEP_SUMMARY）中的日志尾部"
+            dump_fail_summary
+            exit "${RC}"
+          fi
+
           # 找到编出来的 .app（可能落在几个不同位置）
           APP=""
           for p in \
-            "DerivedData/Build/Products/${CFG}-iphoneos/${{ env.APP_NAME }}.app" \
-            "DerivedData/Build/Intermediates.noindex/ArchiveIntermediates/${{ env.APP_NAME }}/InstallationBuildProductsLocation/Applications/${{ env.APP_NAME }}.app" \
-            "DerivedData/Build/Intermediates.noindex/${{ env.APP_NAME }}/Build/Products/${CFG}-iphoneos/${{ env.APP_NAME }}.app"; do
+            "DerivedData/Build/Products/${CFG}-iphoneos/${APP_NAME}.app" \
+            "DerivedData/Build/Intermediates.noindex/ArchiveIntermediates/${APP_NAME}/InstallationBuildProductsLocation/Applications/${APP_NAME}.app" \
+            "DerivedData/Build/Intermediates.noindex/${APP_NAME}/Build/Products/${CFG}-iphoneos/${APP_NAME}.app"; do
             if [ -d "$p" ]; then APP="$p"; break; fi
           done
           if [ -z "${APP}" ]; then
+            echo "::error::未找到编译后的 ${APP_NAME}.app"
             echo "❌ 未找到编译后的 .app，列出 DerivedData 供诊断："
             find DerivedData -maxdepth 6 -name "*.app" -type d 2>/dev/null || true
-            tail -n 200 "${LOG_FILE}" || true
+            dump_fail_summary
             exit 1
           fi
+          echo "app_path=${APP}" >> "$GITHUB_OUTPUT"
           echo "✅ 已找到 .app: ${APP}"
           ls -lh "${APP}"
-          echo "app_path=${APP}" >> $GITHUB_OUTPUT
 
       # ② 优先 xcodebuild archive（有签名 Secrets 时 100% 正确结构，dSYM 齐全）
       #    无签名时若失败 → 不报错，直接走 ③ 手动构造 xcarchive
@@ -360,16 +381,17 @@ jobs:
           if [ "${SIGN}" == "true" ]; then
             EXTRA_ARGS+=(-xcconfig "Build/Sign.xcconfig")
           else
-            # 无签名 + 最宽松的签名检查集
-            EXTRA_ARGS+=(CODE_SIGNING_ALLOWED=NO)
+            # 无签名 archive：ad-hoc 身份签名（比完全禁用签名更容易通过
+            # archive 阶段的嵌入框架 codesign 检查），后续手动导出 IPA
+            # 前会 strip 掉 _CodeSignature，不影响用户本地重签。
+            EXTRA_ARGS+=(CODE_SIGNING_ALLOWED=YES)
             EXTRA_ARGS+=(CODE_SIGNING_REQUIRED=NO)
-            EXTRA_ARGS+=(ENTITLEMENTS_REQUIRED=NO)
-            EXTRA_ARGS+=(ENFORCE_CODE_SIGNING_WHILE_ARCHIVING=NO)
-            EXTRA_ARGS+=(CODE_SIGN_IDENTITY="")
-            EXTRA_ARGS+=(CODE_SIGNING_ENTITLEMENTS="")
-            EXTRA_ARGS+=(PROVISIONING_PROFILE_SPECIFIER="")
+            EXTRA_ARGS+=(CODE_SIGN_IDENTITY="-")
+            EXTRA_ARGS+=(CODE_SIGN_ENTITLEMENTS="")
             EXTRA_ARGS+=(DEVELOPMENT_TEAM="")
-            EXTRA_ARGS+=(EXPANDED_CODE_SIGN_IDENTITY="")
+            EXTRA_ARGS+=(PROVISIONING_PROFILE_SPECIFIER="")
+            EXTRA_ARGS+=(PROVISIONING_PROFILE="")
+            EXTRA_ARGS+=(PROVISIONING_STYLE=Automatic)
           fi
           if [ -f Build/Version.xcconfig ]; then
             EXTRA_ARGS+=(-xcconfig "Build/Version.xcconfig")

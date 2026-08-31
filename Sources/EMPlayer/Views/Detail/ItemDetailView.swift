@@ -491,7 +491,7 @@ struct ItemDetailView: View {
         let it = effectiveItem
         let startTicks = it.playbackPositionTicks
         
-        if let src = it.mediaSources?.first, MediaTypeUtils.isVideo(it) || MediaTypeUtils.isAudio(it) {
+        if it.mediaSources?.first != nil, MediaTypeUtils.isVideo(it) || MediaTypeUtils.isAudio(it) {
             // If we have media sources already, just start
             playerContext = .init(item: it, startTicks: startTicks)
             return

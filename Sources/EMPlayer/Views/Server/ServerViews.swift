@@ -1,133 +1,232 @@
 import SwiftUI
 import EMPlayerCore
 
-// MARK: - Server Add View
+// MARK: - Add Server View（按「添加 Emby」截图重做）
 
 struct ServerAddView: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var serverStore: ServerStore
     @Environment(\.dismiss) private var dismiss
-    
+
+    // 基本信息
     @State private var name: String = ""
+    @State private var remark: String = ""
+    // 连接信息
+    @State private var scheme: String = "https"
     @State private var host: String = ""
-    @State private var apiKey: String = ""
+    @State private var path: String = ""
+    @State private var port: String = "443"
+    @State private var userEditedPort: Bool = false
+    // 凭据
+    @State private var username: String = ""
+    @State private var password: String = ""
+    @State private var showPassword: Bool = false
+    // 安全
+    @State private var skipSSL: Bool = false
+    // 状态
     @State private var isLoading: Bool = false
-    @State private var testResult: String?
-    @State private var showLogin: Bool = false
-    @State private var tempServer: EmbyServer? = nil
-    
-    private var canSave: Bool {
-        !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    @State private var errorMsg: String?
+
+    private var trimmedHost: String {
+        host.trimmingCharacters(in: .whitespacesAndNewlines)
     }
-    
+
+    private var canSubmit: Bool {
+        !isLoading && !trimmedHost.isEmpty &&
+        !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     var body: some View {
         NavigationStack {
             Form {
+                // MARK: 名称 / 备注
+                Section {
+                    fieldRow(label: "名称", placeholder: "名称（可选）", text: $name)
+                    fieldRow(label: "备注", placeholder: "备注（可选）", text: $remark)
+                }
+
+                // MARK: 协议 / 主机 / 路径 / 端口
                 Section {
                     HStack {
-                        Label("名称", systemImage: "server.rack")
-                        TextField("我的 Emby 服务器", text: $name)
-                            .multilineTextAlignment(.trailing)
-                            .autocorrectionDisabled()
+                        Text("协议")
+                        Spacer()
+                        Menu {
+                            Button {
+                                switchScheme("https")
+                            } label: {
+                                if scheme == "https" { Label("HTTPS", systemImage: "checkmark") } else { Text("HTTPS") }
+                            }
+                            Button {
+                                switchScheme("http")
+                            } label: {
+                                if scheme == "http" { Label("HTTP", systemImage: "checkmark") } else { Text("HTTP") }
+                            }
+                        } label: {
+                            HStack(spacing: 6) {
+                                Text(scheme.uppercased())
+                                    .foregroundStyle(.primary)
+                                Image(systemName: "chevron.right")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
                     }
 
+                    fieldRow(label: "主机", placeholder: "主机（必填）", text: $host, keyboard: .URL)
+                    fieldRow(label: "路径", placeholder: "路径（可选）", text: $path, keyboard: .URL)
                     HStack {
-                        Label("地址", systemImage: "network")
-                        TextField("http://192.168.1.100:8096", text: $host)
-                            .keyboardType(.URL)
-                            .autocapitalization(.none)
-                            .autocorrectionDisabled()
+                        Text("端口")
+                        Spacer()
+                        TextField(scheme == "https" ? "443" : "8096", text: $port)
+                            .keyboardType(.numberPad)
                             .multilineTextAlignment(.trailing)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: 120)
+                            .onChange(of: port) { _, newValue in
+                                userEditedPort = !newValue.isEmpty
+                            }
                     }
-
-                    HStack {
-                        Label("API Key", systemImage: "key")
-                        SecureField("可选", text: $apiKey)
-                            .autocapitalization(.none)
-                            .multilineTextAlignment(.trailing)
-                    }
-                } header: {
-                    Text("服务器信息")
-                } footer: {
-                    Text("地址示例：\n• http://192.168.1.100:8096\n• https://emby.example.com\nAPI Key 在服务器管理面板 → 高级 → API密钥 中生成。不填时使用用户名密码登录。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
                 }
-                
+
+                // MARK: 用户名 / 密码
+                Section {
+                    fieldRow(label: "用户名", placeholder: "用户名（必填）", text: $username, keyboard: .username)
+                    HStack {
+                        Text("密码")
+                        Spacer()
+                        Group {
+                            if showPassword {
+                                TextField("密码（可选）", text: $password)
+                            } else {
+                                SecureField("密码（可选）", text: $password)
+                            }
+                        }
+                        .multilineTextAlignment(.trailing)
+                        Button {
+                            showPassword.toggle()
+                        } label: {
+                            Image(systemName: showPassword ? "eye.slash" : "eye")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.leading, 6)
+                    }
+                }
+
+                // MARK: SSL
+                Section {
+                    Toggle(isOn: $skipSSL) {
+                        Text("跳过 SSL 验证")
+                    }
+                } footer: {
+                    Text("仅允许用于信任的网络环境")
+                }
+
+                // MARK: 提交
                 Section {
                     if isLoading {
-                        ProgressView()
-                            .frame(maxWidth: .infinity)
+                        HStack {
+                            Spacer()
+                            ProgressView()
+                            Text("正在连接…").foregroundStyle(.secondary)
+                            Spacer()
+                        }
                     } else {
                         Button {
-                            Task { await testAndContinue() }
+                            Task { await submit() }
                         } label: {
-                            Label("连接并继续", systemImage: "link.circle")
+                            Text("连接并添加")
                                 .frame(maxWidth: .infinity)
                         }
-                        .disabled(!canSave || isLoading)
                         .buttonStyle(.borderedProminent)
                         .controlSize(.large)
+                        .disabled(!canSubmit)
                         .listRowInsets(.init(top: 4, leading: 0, bottom: 4, trailing: 0))
                         .listRowBackground(Color.clear)
                     }
-                    
-                    if let msg = testResult {
-                        Text(msg)
+                    if let errorMsg {
+                        Text(errorMsg)
                             .font(.footnote)
                             .foregroundStyle(.red)
                     }
                 }
             }
-            .navigationTitle("添加服务器")
+            .navigationTitle("添加 Emby")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                if !serverStore.servers.isEmpty {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("取消") { dismiss() }
-                    }
-                }
-            }
-            .sheet(isPresented: $showLogin) {
-                if let server = tempServer {
-                    LoginView(server: server, presetAPIKey: apiKey) { savedServer in
-                        serverStore.add(server: savedServer)
-                        serverStore.setActive(server: savedServer)
-                        Task { await appState.connect(to: savedServer) }
-                        dismiss()
-                    }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
                 }
             }
         }
     }
-    
-    private func testAndContinue() async {
+
+    // MARK: - 控件复用
+
+    @ViewBuilder
+    private func fieldRow(
+        label: String,
+        placeholder: String,
+        text: Binding<String>,
+        keyboard: UIKeyboardType = .default
+    ) -> some View {
+        HStack {
+            Text(label)
+            Spacer()
+            TextField(placeholder, text: text)
+                .keyboardType(keyboard)
+                .autocapitalization(.none)
+                .autocorrectionDisabled()
+                .multilineTextAlignment(.trailing)
+        }
+    }
+
+    // MARK: - 动作
+
+    private func switchScheme(_ newScheme: String) {
+        let oldDefault = scheme == "https" ? "443" : "8096"
+        scheme = newScheme
+        // 用户没手动改过端口（或仍为旧协议默认值）时，自动切换为新协议默认端口
+        if !userEditedPort || port.isEmpty || port == oldDefault {
+            port = newScheme == "https" ? "443" : "8096"
+            userEditedPort = false
+        }
+    }
+
+    private func makeServer() -> EmbyServer {
+        let portValue = Int(port.filter { $0.isNumber })
+        let rawPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        var normalizedPath: String? = nil
+        if !rawPath.isEmpty {
+            var p = rawPath
+            while p.hasSuffix("/") { p.removeLast() }
+            if !p.hasPrefix("/") { p = "/" + p }
+            normalizedPath = p
+        }
+        return EmbyServer(
+            name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+            remark: remark.isEmpty ? nil : remark,
+            scheme: scheme,
+            host: trimmedHost,
+            port: portValue,
+            path: normalizedPath,
+            skipSSL: skipSSL,
+            username: username.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
+    private func submit() async {
+        guard canSubmit else { return }
         isLoading = true
-        testResult = nil
+        errorMsg = nil
         defer { isLoading = false }
-        
-        let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
-        let serverName = name.isEmpty ? (try? await EmbyClient.shared.getPublicSystemInfo(host: trimmedHost).serverName) ?? "Emby Server" : name
-        
-        var server = EmbyServer(name: serverName, host: trimmedHost)
-        if !apiKey.isEmpty { server.apiKey = apiKey }
-        
+
+        let server = makeServer()
         do {
-            let info = try await EmbyClient.shared.getPublicSystemInfo(host: trimmedHost)
-            print("[AddServer] Connected: \(info.serverName) v\(info.version)")
-            
-            // If API key is provided, save & connect directly (no login needed)
-            if !apiKey.isEmpty {
-                serverStore.add(server: server)
-                serverStore.setActive(server: server)
-                Task { await appState.connect(to: server) }
-                dismiss()
-            } else {
-                tempServer = server
-                showLogin = true
-            }
+            try await appState.configureServer(server, username: username, password: password)
+            dismiss()
         } catch {
-            testResult = "连接失败：\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
+            errorMsg = "连接失败：\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
         }
     }
 }
@@ -140,7 +239,7 @@ struct ServerListView: View {
     @State private var showAdd: Bool = false
     @State private var editingServer: EmbyServer?
     @State private var connectingServerId: String?
-    
+
     var body: some View {
         NavigationStack {
             List {
@@ -161,7 +260,7 @@ struct ServerListView: View {
                                     connectingServerId = s.id
                                     Task {
                                         await appState.connect(to: s)
-                                        if s.accessToken != nil || s.apiKey != nil {
+                                        if s.accessToken != nil {
                                             serverStore.setActive(server: s)
                                         }
                                         connectingServerId = nil
@@ -213,7 +312,7 @@ struct ServerListView: View {
                 if let server = appState.currentServer {
                     NavigationStack {
                         LoginView(server: server) { savedServer in
-                            serverStore.update(server: savedServer)
+                            serverStore.add(server: savedServer)
                             serverStore.setActive(server: savedServer)
                             Task { await appState.connect(to: savedServer) }
                         }
@@ -228,7 +327,7 @@ struct ServerRow: View {
     let server: EmbyServer
     let isActive: Bool
     let isConnecting: Bool
-    
+
     var body: some View {
         HStack(spacing: 12) {
             ZStack {
@@ -239,10 +338,10 @@ struct ServerRow: View {
                     .foregroundStyle(isActive ? .indigo : .secondary)
             }
             .frame(width: 44, height: 44)
-            
+
             VStack(alignment: .leading, spacing: 3) {
                 HStack {
-                    Text(server.name)
+                    Text(displayName)
                         .font(.headline)
                     if isActive {
                         Text("当前")
@@ -252,11 +351,11 @@ struct ServerRow: View {
                             .foregroundStyle(.indigo)
                     }
                 }
-                Text(server.baseURL())
+                Text(server.displayURL)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 HStack(spacing: 8) {
-                    if server.accessToken != nil || server.apiKey != nil {
+                    if server.accessToken != nil {
                         Label("已认证", systemImage: "checkmark.circle.fill")
                             .font(.caption2)
                             .foregroundStyle(.green)
@@ -272,7 +371,7 @@ struct ServerRow: View {
                     }
                 }
             }
-            
+
             Spacer()
             if isConnecting {
                 ProgressView()
@@ -282,51 +381,116 @@ struct ServerRow: View {
         }
         .padding(.vertical, 4)
     }
+
+    private var displayName: String {
+        server.name.isEmpty ? server.host : server.name
+    }
 }
 
 // MARK: - Server Edit View
 
 struct ServerEditView: View {
-    let server: EmbyServer
+    let originalServer: EmbyServer
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var serverStore: ServerStore
     @Environment(\.dismiss) private var dismiss
-    
+
     @State private var name: String
+    @State private var remark: String
+    @State private var scheme: String
     @State private var host: String
-    @State private var apiKey: String
+    @State private var path: String
+    @State private var port: String
+    @State private var skipSSL: Bool
     @State private var saving: Bool = false
-    
+
     init(server: EmbyServer) {
-        self.server = server
+        self.originalServer = server
         self._name = State(initialValue: server.name)
+        self._remark = State(initialValue: server.remark ?? "")
+        self._scheme = State(initialValue: server.scheme)
         self._host = State(initialValue: server.host)
-        self._apiKey = State(initialValue: server.apiKey ?? "")
+        self._path = State(initialValue: server.path ?? "")
+        self._port = State(initialValue: server.port.map(String.init) ?? "")
+        self._skipSSL = State(initialValue: server.skipSSL)
     }
-    
+
     var body: some View {
         NavigationStack {
             Form {
-                Section("服务器信息") {
+                Section {
                     HStack {
-                        Label("名称", systemImage: "server.rack")
-                        TextField("名称", text: $name)
+                        Text("名称")
+                        Spacer()
+                        TextField("名称（可选）", text: $name)
+                            .autocorrectionDisabled()
                             .multilineTextAlignment(.trailing)
                     }
                     HStack {
-                        Label("地址", systemImage: "network")
-                        TextField("地址", text: $host)
-                            .keyboardType(.URL)
-                            .autocapitalization(.none)
-                            .multilineTextAlignment(.trailing)
-                    }
-                    HStack {
-                        Label("API Key", systemImage: "key")
-                        SecureField("API Key", text: $apiKey)
+                        Text("备注")
+                        Spacer()
+                        TextField("备注（可选）", text: $remark)
                             .multilineTextAlignment(.trailing)
                     }
                 }
-                
+
+                Section {
+                    HStack {
+                        Text("协议")
+                        Spacer()
+                        Menu {
+                            Button { scheme = "https" } label: {
+                                if scheme == "https" { Label("HTTPS", systemImage: "checkmark") } else { Text("HTTPS") }
+                            }
+                            Button { scheme = "http" } label: {
+                                if scheme == "http" { Label("HTTP", systemImage: "checkmark") } else { Text("HTTP") }
+                            }
+                        } label: {
+                            HStack(spacing: 6) {
+                                Text(scheme.uppercased()).foregroundStyle(.primary)
+                                Image(systemName: "chevron.right")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                    }
+                    HStack {
+                        Text("主机")
+                        Spacer()
+                        TextField("主机（必填）", text: $host)
+                            .keyboardType(.URL)
+                            .autocapitalization(.none)
+                            .autocorrectionDisabled()
+                            .multilineTextAlignment(.trailing)
+                    }
+                    HStack {
+                        Text("路径")
+                        Spacer()
+                        TextField("路径（可选）", text: $path)
+                            .keyboardType(.URL)
+                            .autocapitalization(.none)
+                            .autocorrectionDisabled()
+                            .multilineTextAlignment(.trailing)
+                    }
+                    HStack {
+                        Text("端口")
+                        Spacer()
+                        TextField(scheme == "https" ? "443" : "8096", text: $port)
+                            .keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: 120)
+                    }
+                }
+
+                Section {
+                    Toggle(isOn: $skipSSL) {
+                        Text("跳过 SSL 验证")
+                    }
+                } footer: {
+                    Text("仅允许用于信任的网络环境")
+                }
+
                 Section {
                     if saving {
                         ProgressView().frame(maxWidth: .infinity)
@@ -337,22 +501,23 @@ struct ServerEditView: View {
                         .frame(maxWidth: .infinity)
                         .buttonStyle(.borderedProminent)
                         .controlSize(.large)
+                        .disabled(host.trimmingCharacters(in: .whitespaces).isEmpty)
                         .listRowInsets(.init())
                         .listRowBackground(Color.clear)
                     }
                 }
-                
+
                 Section("危险操作") {
                     Button(role: .destructive) {
-                        serverStore.logout(server: server)
+                        serverStore.logout(server: originalServer)
                         appState.logout()
                         dismiss()
                     } label: {
                         Label("退出登录", systemImage: "pip.exit")
                     }
-                    
+
                     Button(role: .destructive) {
-                        serverStore.remove(server: server)
+                        serverStore.remove(server: originalServer)
                         appState.logout()
                         dismiss()
                     } label: {
@@ -369,16 +534,32 @@ struct ServerEditView: View {
             }
         }
     }
-    
+
     private func save() async {
         saving = true
         defer { saving = false }
-        var updated = EmbyServer(name: name.isEmpty ? server.name : name, host: host, apiKey: apiKey.isEmpty ? nil : apiKey)
-        updated.userId = server.userId
-        updated.accessToken = server.accessToken
+
+        var updated = originalServer
+        updated.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        updated.remark = remark.isEmpty ? nil : remark
+        updated.scheme = scheme
+        updated.host = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        updated.port = Int(port.filter { $0.isNumber })
+        let rawPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        if rawPath.isEmpty {
+            updated.path = nil
+        } else {
+            var p = rawPath
+            while p.hasSuffix("/") { p.removeLast() }
+            if !p.hasPrefix("/") { p = "/" + p }
+            updated.path = p
+        }
+        updated.skipSSL = skipSSL
         updated.lastConnected = Date()
-        serverStore.update(server: updated)
-        if serverStore.activeServer?.id == server.id {
+
+        // 连接信息变化会导致 id 变化：替换旧记录（保留登录令牌）
+        serverStore.replace(serverId: originalServer.id, with: updated)
+        if serverStore.activeServerId == originalServer.id || serverStore.activeServer == nil {
             serverStore.setActive(server: updated)
             await appState.connect(to: updated)
         }

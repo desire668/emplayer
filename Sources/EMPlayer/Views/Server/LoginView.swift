@@ -3,9 +3,8 @@ import EMPlayerCore
 
 struct LoginView: View {
     @EnvironmentObject var appState: AppState
-    
+
     let server: EmbyServer
-    var presetAPIKey: String? = nil
     var onSuccess: (EmbyServer) -> Void
     
     @State private var publicUsers: [EmbyUser] = []
@@ -121,7 +120,7 @@ struct LoginView: View {
             fetched = true
             if !publicUsers.isEmpty { return }
             do {
-                let users = try await EmbyClient.shared.getPublicUsers(host: server.host)
+                let users = try await EmbyClient.shared.getPublicUsers(baseURL: server.baseURL())
                 publicUsers = users
                 if let first = users.first {
                     selectedUserId = first.id
@@ -129,11 +128,6 @@ struct LoginView: View {
                 }
             } catch {
                 errorMsg = "获取用户列表失败，请手动输入用户名。"
-            }
-        }
-        .onAppear {
-            if let key = presetAPIKey, !key.isEmpty {
-                // API Key login doesn't need user/pass
             }
         }
     }
@@ -148,24 +142,20 @@ struct LoginView: View {
         errorMsg = nil
         defer { isLoading = false }
         
-        var serverToUse = server
-        if let key = presetAPIKey, !key.isEmpty {
-            serverToUse.apiKey = key
-        }
-        
-        // Use preset server + credentials
+        // 使用服务器地址 + 用户名密码登录
         do {
             let auth = try await EmbyClient.shared.login(
-                server: serverToUse,
+                server: server,
                 username: username,
                 password: password
             )
-            var saved = serverToUse
+            var saved = server
             saved.accessToken = auth.accessToken
             saved.userId = auth.user.id
+            saved.username = username
             saved.lastConnected = Date()
             if saved.name.isEmpty {
-                saved.name = (try? await EmbyClient.shared.getPublicSystemInfo(host: server.host).serverName) ?? "Emby Server"
+                saved.name = (try? await EmbyClient.shared.getPublicSystemInfo(baseURL: server.baseURL()).serverName) ?? "Emby Server"
             }
             onSuccess(saved)
         } catch {
@@ -222,7 +212,7 @@ private struct UserRow: View {
 
 #Preview {
     NavigationStack {
-        LoginView(server: EmbyServer(name: "Test", host: "http://localhost:8096")) { _ in }
+        LoginView(server: EmbyServer(name: "Test", scheme: "http", host: "localhost", port: 8096)) { _ in }
     }
     .environmentObject(AppState.shared)
 }

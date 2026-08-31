@@ -28,45 +28,70 @@ public final class AppState: ObservableObject {
     public func connect(to server: EmbyServer) async {
         currentServer = server
         EmbyClient.shared.setServer(server)
-        
-        if server.accessToken != nil || server.apiKey != nil {
-            // Token/API key present: try fetching user
-            do {
-                let uid = server.userId
-                if uid == nil || uid!.isEmpty {
-                    // Use API key without user (admin-style); fetch public users first and pick first admin
-                    let users = try await EmbyClient.shared.getPublicUsers(host: server.host)
-                    if let user = users.first {
-                        var updated = server
-                        updated.userId = user.id
-                        updated.lastConnected = Date()
-                        ServerStore.shared.update(server: updated)
-                        currentServer = updated
-                        currentUser = user
-                        isLoggedIn = true
-                    }
-                } else {
-                    do {
-                        let user = try await EmbyClient.shared.getCurrentUser()
-                        currentUser = user
-                        isLoggedIn = true
-                        var updated = server
-                        updated.lastConnected = Date()
-                        ServerStore.shared.update(server: updated)
-                    } catch {
-                        // Token likely expired
-                        handleError(error, fallback: "登录已过期，请重新登录")
-                        isLoggedIn = false
-                    }
+
+        guard let token = server.accessToken, !token.isEmpty else {
+            // 无令牌，需要登录
+            isLoggedIn = false
+            return
+        }
+
+        do {
+            let user: EmbyUser
+            if let uid = server.userId, !uid.isEmpty {
+                user = try await EmbyClient.shared.getCurrentUser()
+            } else {
+                // 旧数据可能缺 userId：拉取公开用户取第一个（多数家用服务器即本人账号）
+                let users = try await EmbyClient.shared.getPublicUsers(baseURL: server.baseURL())
+                guard let first = users.first else {
+                    isLoggedIn = false
+                    return
                 }
-            } catch {
-                handleError(error, fallback: "连接服务器失败")
-                isLoggedIn = false
+                user = first
             }
-        } else {
-            // No credentials — user needs to log in
+            currentUser = user
+            isLoggedIn = true
+            var updated = server
+            updated.userId = user.id
+            updated.lastConnected = Date()
+            ServerStore.shared.add(server: updated)
+            currentServer = updated
+        } catch {
+            // 令牌过期等：回到登录态
+            handleError(error, fallback: "登录已过期，请重新登录")
             isLoggedIn = false
         }
+    }
+
+    /// 「添加服务器」表单直连：校验地址 → 用户名密码登录 → 保存并激活
+    @discardableResult
+    public func configureServer(_ server: EmbyServer, username: String, password: String) async throws -> EmbyServer {
+        let trimmedUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // 1. 探测服务器（顺便取真实服务器名）
+        let info = try? await EmbyClient.shared.getPublicSystemInfo(baseURL: server.baseURL())
+
+        // 2. 用户名密码登录
+        let auth = try await EmbyClient.shared.login(server: server, username: trimmedUser, password: password)
+        EmbyClient.shared.setAuth(user: auth.user, accessToken: auth.accessToken)
+
+        var saved = server
+        if saved.name.isEmpty {
+            saved.name = info?.serverName ?? "Emby Server"
+        }
+        saved.username = trimmedUser
+        saved.userId = auth.user.id
+        saved.accessToken = auth.accessToken
+        saved.lastConnected = Date()
+
+        ServerStore.shared.add(server: saved)
+        ServerStore.shared.setActive(server: saved)
+
+        currentServer = saved
+        currentUser = auth.user
+        isLoggedIn = true
+        libraries = []
+        libraryCache = [:]
+        return saved
     }
     
     public func login(username: String, password: String) async {

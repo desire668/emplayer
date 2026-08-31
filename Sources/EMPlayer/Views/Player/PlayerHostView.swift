@@ -276,7 +276,7 @@ struct PlayerHostView: View {
         opt.startPlayTime = max(0, startSeconds)
         opt.userAgent = "EMPlayer/1.0 (iOS)"
         // Emby 鉴权头（AVPlayer 内核读取 AVURLAssetHTTPHeaderFieldsKey）
-        if let token = EmbyClient.shared.accessToken ?? EmbyClient.shared.currentServer?.apiKey {
+        if let token = EmbyClient.shared.accessToken {
             opt.avOptions = [
                 "AVURLAssetHTTPHeaderFieldsKey": [
                     "User-Agent": "EMPlayer/1.0 (iOS)",

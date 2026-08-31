@@ -3,29 +3,90 @@ import Foundation
 // MARK: - Emby Server Info
 
 public struct EmbyServer: Codable, Identifiable, Equatable, Hashable {
-    public var id: String { name + host }
+    /// 稳定标识：只与连接信息有关（改名称/备注不影响 id）
+    public var id: String {
+        "\(scheme)://\(host.lowercased()):\(port ?? 0)\(normalizedPath)"
+    }
+    /// 用户自定义显示名称，可空；为空时用服务器返回的 ServerName
     public var name: String
-    public let host: String       // e.g. "http://192.168.1.100:8096"
-    public var apiKey: String?
+    /// 备注（可选）
+    public var remark: String?
+    /// "http" 或 "https"
+    public var scheme: String
+    /// 纯主机名 / IP（不含协议、端口、路径）
+    public var host: String
+    /// 端口；nil 表示使用协议默认端口
+    public var port: Int?
+    /// 反向代理子路径，如 "/emby"，可空
+    public var path: String?
+    /// 跳过 SSL 证书校验（自签名证书场景）
+    public var skipSSL: Bool
+    /// 上次登录使用的用户名（用于回填）
+    public var username: String?
     public var userId: String?
     public var accessToken: String?
     public var lastConnected: Date?
-    
-    public init(name: String, host: String, apiKey: String? = nil) {
+
+    public init(
+        name: String = "",
+        remark: String? = nil,
+        scheme: String = "https",
+        host: String,
+        port: Int? = nil,
+        path: String? = nil,
+        skipSSL: Bool = false,
+        username: String? = nil
+    ) {
         self.name = name
+        self.remark = remark
+        self.scheme = scheme.lowercased() == "http" ? "http" : "https"
         self.host = host.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.apiKey = apiKey
+        self.port = port
+        self.path = path
+        self.skipSSL = skipSSL
+        self.username = username
     }
-    
+
+    /// 从完整 URL 字符串解析（兼容旧数据 / 手填地址），失败返回 nil
+    public init?(baseURLString: String, name: String = "") {
+        var str = baseURLString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !str.isEmpty else { return nil }
+        if !str.contains("://") { str = "http://" + str }
+        guard let comps = URLComponents(string: str), let host = comps.host, !host.isEmpty else { return nil }
+        self.init(
+            name: name,
+            scheme: comps.scheme ?? "http",
+            host: host,
+            port: comps.port,
+            path: comps.path.isEmpty ? nil : comps.path
+        )
+    }
+
+    /// 规范化后的子路径：保证以 "/" 开头、不以 "/" 结尾；空路径返回 ""
+    public var normalizedPath: String {
+        guard var p = path?.trimmingCharacters(in: .whitespacesAndNewlines), !p.isEmpty else { return "" }
+        while p.hasSuffix("/") { p.removeLast() }
+        if !p.hasPrefix("/") { p = "/" + p }
+        return p
+    }
+
+    /// 完整基础地址，如 "https://emby.example.com:443/emby"
     public func baseURL() -> String {
-        var url = host
-        if !url.hasPrefix("http://") && !url.hasPrefix("https://") {
-            url = "http://" + url
+        let h = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        var portPart = ""
+        if let port = port, port > 0 { portPart = ":\(port)" }
+        return "\(scheme)://\(h)\(portPart)\(normalizedPath)"
+    }
+
+    /// 展示给用户看的地址（默认端口不显示）
+    public var displayURL: String {
+        let h = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        var portPart = ""
+        if let port = port, port > 0 {
+            let isDefault = (scheme == "https" && port == 443) || (scheme == "http" && port == 80)
+            if !isDefault { portPart = ":\(port)" }
         }
-        if url.hasSuffix("/") {
-            url.removeLast()
-        }
-        return url
+        return "\(scheme)://\(h)\(portPart)\(normalizedPath)"
     }
 }
 

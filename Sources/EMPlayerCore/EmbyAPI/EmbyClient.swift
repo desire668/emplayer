@@ -41,8 +41,9 @@ public final class EmbyClient {
     public private(set) var accessToken: String?
     
     private let session: URLSession
+    private let sessionHolder: SessionDelegate
     private let jsonDecoder: JSONDecoder
-    
+
     private init() {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 30
@@ -50,11 +51,30 @@ public final class EmbyClient {
         config.httpCookieAcceptPolicy = .always
         config.httpShouldSetCookies = true
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        self.session = URLSession(configuration: config)
-        
+
+        // delegate：用于「跳过 SSL 验证」的自签名证书场景
+        let holder = SessionDelegate()
+        self.sessionHolder = holder
+        self.session = URLSession(configuration: config, delegate: holder, delegateQueue: nil)
+
         self.jsonDecoder = JSONDecoder()
         self.jsonDecoder.keyDecodingStrategy = .useDefaultKeys
         self.jsonDecoder.dateDecodingStrategy = .iso8601
+    }
+
+    /// URLSession 委托：当前服务器开启 skipSSL 时信任自签名证书
+    final class SessionDelegate: NSObject, URLSessionDelegate {
+        func urlSession(_ session: URLSession,
+                        didReceive challenge: URLAuthenticationChallenge,
+                        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+            guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+                  EmbyClient.shared.currentServer?.skipSSL == true,
+                  let trust = challenge.protectionSpace.serverTrust else {
+                completionHandler(.performDefaultHandling, nil)
+                return
+            }
+            completionHandler(.useCredential, URLCredential(trust: trust))
+        }
     }
     
     // MARK: - Setup / Auth
@@ -120,8 +140,6 @@ public final class EmbyClient {
         ]
         if let token = accessToken, !token.isEmpty {
             headerComponents.append("Token=\"\(token)\"")
-        } else if let key = currentServer?.apiKey, !key.isEmpty {
-            headerComponents.append("Token=\"\(key)\"")
         }
         
         return [
@@ -210,21 +228,24 @@ public final class EmbyClient {
 
 extension EmbyClient {
     /// Get public server info without authentication.
-    public func getPublicSystemInfo(host: String) async throws -> PublicSystemInfo {
+    /// - Parameter baseURL: 完整基础地址（含协议/端口/子路径）
+    public func getPublicSystemInfo(baseURL: String) async throws -> PublicSystemInfo {
+        guard let temp = EmbyServer(baseURLString: baseURL) else { throw EmbyAPIError.invalidURL }
         let savedServer = currentServer
         defer { currentServer = savedServer }
-        
-        let tempHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
-        currentServer = EmbyServer(name: "temp", host: tempHost)
+
+        currentServer = temp
         return try await request(method: "GET", path: "/emby/System/Info/Public")
     }
-    
+
     /// Get public users on server (for login screen user picker).
-    public func getPublicUsers(host: String) async throws -> [EmbyUser] {
+    /// - Parameter baseURL: 完整基础地址（含协议/端口/子路径）
+    public func getPublicUsers(baseURL: String) async throws -> [EmbyUser] {
+        guard let temp = EmbyServer(baseURLString: baseURL) else { throw EmbyAPIError.invalidURL }
         let savedServer = currentServer
         defer { currentServer = savedServer }
-        
-        currentServer = EmbyServer(name: "temp", host: host)
+
+        currentServer = temp
         let result: QueryResult<EmbyUser> = try await request(
             method: "GET",
             path: "/emby/Users/Public"
@@ -232,10 +253,7 @@ extension EmbyClient {
         // Some Emby versions return array directly
         if result.items.isEmpty {
             do {
-                guard let base = currentServer?.baseURL(),
-                      let url = URL(string: base.appending("/emby/Users/Public")) else {
-                    return []
-                }
+                guard let url = buildURL(path: "/emby/Users/Public") else { return [] }
                 var req = URLRequest(url: url)
                 authHeaders().forEach { req.addValue($1, forHTTPHeaderField: $0) }
                 let (data, _) = try await session.data(for: req)
@@ -572,8 +590,6 @@ extension EmbyClient {
         if fillWidth { queryParts.append("FillWidth=\(maxWidth ?? 600)") }
         if let token = accessToken, !token.isEmpty {
             queryParts.append("api_key=\(token)")
-        } else if let key = server.apiKey, !key.isEmpty {
-            queryParts.append("api_key=\(key)")
         }
         let qs = queryParts.isEmpty ? "" : "?" + queryParts.joined(separator: "&")
         return URL(string: base + path + qs)
@@ -611,7 +627,7 @@ extension EmbyClient {
         var qs: [String] = []
         qs.append("MediaSourceId=\(mediaSource.id)")
         qs.append("Static=true")
-        qs.append("api_key=\(accessToken ?? server.apiKey ?? "")")
+        qs.append("api_key=\(accessToken ?? "")")
         if startTimeTicks > 0 {
             qs.append("StartTimeTicks=\(startTimeTicks)")
         }
@@ -640,7 +656,7 @@ extension EmbyClient {
         qs.append("AudioCodec=\(audioCodec)")
         qs.append("MaxBitrate=\(maxBitrate)")
         qs.append("MaxAudioChannels=\(maxAudioChannels)")
-        qs.append("api_key=\(accessToken ?? server.apiKey ?? "")")
+        qs.append("api_key=\(accessToken ?? "")")
         if let ai = audioStreamIndex { qs.append("AudioStreamIndex=\(ai)") }
         if let si = subtitleStreamIndex { qs.append("SubtitleStreamIndex=\(si)") }
         let path = "/emby/Videos/\(mediaSource.id)/master.m3u8?\(qs.joined(separator: "&"))"
@@ -650,14 +666,14 @@ extension EmbyClient {
     public func audioStreamURL(mediaSource: MediaSource, container: String = "aac") -> URL? {
         guard let server = currentServer else { return nil }
         let base = server.baseURL()
-        let path = "/emby/Audio/\(mediaSource.id)/stream.\(container)?Static=true&api_key=\(accessToken ?? server.apiKey ?? "")"
+        let path = "/emby/Audio/\(mediaSource.id)/stream.\(container)?Static=true&api_key=\(accessToken ?? "")"
         return URL(string: base + path)
     }
     
     public func subtitleURL(itemId: String, mediaSourceId: String, subtitleStreamIndex: Int, format: String = "srt") -> URL? {
         guard let server = currentServer else { return nil }
         let base = server.baseURL()
-        let path = "/emby/Videos/\(itemId)/\(mediaSourceId)/Subtitles/\(subtitleStreamIndex)/0/Stream.\(format)?api_key=\(accessToken ?? server.apiKey ?? "")"
+        let path = "/emby/Videos/\(itemId)/\(mediaSourceId)/Subtitles/\(subtitleStreamIndex)/0/Stream.\(format)?api_key=\(accessToken ?? "")"
         return URL(string: base + path)
     }
 }

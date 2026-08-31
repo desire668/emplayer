@@ -33,11 +33,11 @@ targets:
     info:
       path: Sources/EMPlayer/Info.plist
       properties:
+        CFBundleDevelopmentRegion: zh_CN
         CFBundleDisplayName: EMPlayer
         CFBundleName: EMPlayer
-        UILaunchScreen:
-          UIColorName: LaunchScreenBackgroundColor
-          UIImageName: LaunchImage
+        LSRequiresIPhoneOS: true
+        UILaunchStoryboardName: LaunchScreen
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
@@ -48,13 +48,22 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         UIRequiresFullScreen: false
-        NSAppTransportSecurity:
-          NSAllowsArbitraryLoads: true
+        UIViewControllerBasedStatusBarAppearance: true
         UIBackgroundModes:
           - audio
           - fetch
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+          NSAllowsArbitraryLoadsInWebContent: true
+          NSAllowsLocalNetworking: true
         NSCameraUsageDescription: 需要访问相册来选择视频文件
         NSPhotoLibraryUsageDescription: 需要访问相册来选择视频文件
+        NSLocalNetworkUsageDescription: 需要访问本地网络以连接 Emby 服务器
+        NSBonjourServices:
+          - _emby-server._tcp
+        ITSAppUsesNonExemptEncryption: false
+        UIUserInterfaceStyle: Dark
+        CADisableMinimumFrameDurationOnPhone: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.emplayer.app

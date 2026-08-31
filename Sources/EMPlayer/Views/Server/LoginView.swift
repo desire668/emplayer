@@ -120,7 +120,7 @@ struct LoginView: View {
             fetched = true
             if !publicUsers.isEmpty { return }
             do {
-                let users = try await EmbyClient.shared.getPublicUsers(baseURL: server.baseURL(), skipSSL: server.skipSSL)
+                let users = try await fetchPublicUsers()
                 publicUsers = users
                 if let first = users.first {
                     selectedUserId = first.id
@@ -129,6 +129,16 @@ struct LoginView: View {
             } catch {
                 errorMsg = "获取用户列表失败，请手动输入用户名。"
             }
+        }
+    }
+
+    /// 拉取公开用户；HTTPS 自签名证书失败时自动信任后重试一次
+    private func fetchPublicUsers() async throws -> [EmbyUser] {
+        do {
+            return try await EmbyClient.shared.getPublicUsers(baseURL: server.baseURL(), skipSSL: server.skipSSL)
+        } catch {
+            guard server.scheme == "https", !server.skipSSL, EmbyAPIError.isTLSTrustFailure(error) else { throw error }
+            return try await EmbyClient.shared.getPublicUsers(baseURL: server.baseURL(), skipSSL: true)
         }
     }
     
@@ -144,18 +154,23 @@ struct LoginView: View {
         
         // 使用服务器地址 + 用户名密码登录
         do {
-            let auth = try await EmbyClient.shared.login(
-                server: server,
-                username: username,
-                password: password
-            )
-            var saved = server
+            // 自签名 HTTPS 兜底：先按当前设置登录，证书失败则自动信任后重试一次
+            var loginServer = server
+            let auth: EmbyAuthResult
+            do {
+                auth = try await EmbyClient.shared.login(server: loginServer, username: username, password: password)
+            } catch {
+                guard loginServer.scheme == "https", !loginServer.skipSSL, EmbyAPIError.isTLSTrustFailure(error) else { throw error }
+                loginServer.skipSSL = true
+                auth = try await EmbyClient.shared.login(server: loginServer, username: username, password: password)
+            }
+            var saved = loginServer
             saved.accessToken = auth.accessToken
             saved.userId = auth.user.id
             saved.username = username
             saved.lastConnected = Date()
             if saved.name.isEmpty {
-                saved.name = (try? await EmbyClient.shared.getPublicSystemInfo(baseURL: server.baseURL(), skipSSL: server.skipSSL).serverName) ?? "Emby Server"
+                saved.name = (try? await EmbyClient.shared.getPublicSystemInfo(baseURL: loginServer.baseURL(), skipSSL: loginServer.skipSSL).serverName) ?? "Emby Server"
             }
             onSuccess(saved)
         } catch {

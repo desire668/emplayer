@@ -10,23 +10,76 @@ public enum EmbyAPIError: Error, LocalizedError {
     case invalidResponse
     case httpError(statusCode: Int, message: String)
     case unauthorized
+    case invalidCredentials
     case notFound
     case decodingError(Error)
     case networkError(Error)
     case serverError(String)
     case cancelled
-    
+
     public var errorDescription: String? {
         switch self {
         case .invalidURL: return "无效的服务器地址"
         case .invalidResponse: return "服务器响应无效"
         case .httpError(let code, let msg): return "HTTP \(code): \(msg)"
         case .unauthorized: return "未授权，请重新登录"
-        case .notFound: return "资源未找到"
+        case .invalidCredentials: return "用户名或密码错误，请检查后重试"
+        case .notFound: return "资源未找到（服务器地址或路径可能不正确）"
         case .decodingError(let err): return "数据解析失败: \(err.localizedDescription)"
-        case .networkError(let err): return "网络错误: \(err.localizedDescription)"
+        case .networkError(let err): return EmbyAPIError.friendlyNetworkMessage(err)
         case .serverError(let msg): return "服务器错误: \(msg)"
         case .cancelled: return "请求已取消"
+        }
+    }
+
+    /// 是否为 TLS 证书 / 安全连接类失败（用于自动按「跳过 SSL 验证」重试）
+    public static func isTLSTrustFailure(_ error: Error) -> Bool {
+        if let api = error as? EmbyAPIError {
+            if case .networkError(let inner) = api { return isTLSTrustFailure(inner) }
+            return false
+        }
+        let ns = error as NSError
+        guard ns.domain == NSURLErrorDomain else { return false }
+        switch ns.code {
+        case NSURLErrorSecureConnectionFailed,            // -1200 安全连接失败（含 HTTP 服务开在 HTTPS 端口）
+             NSURLErrorServerCertificateHasBadDate,        // -1201 证书过期 / 日期无效
+             NSURLErrorServerCertificateUntrusted,         // -1202 自签名 / 主机名不匹配
+             NSURLErrorServerCertificateHasUnknownRoot,    // -1203 未知根证书
+             NSURLErrorServerCertificateNotYetValid:       // -1204 证书尚未生效
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func friendlyNetworkMessage(_ error: Error) -> String {
+        let ns = error as NSError
+        guard ns.domain == NSURLErrorDomain else {
+            return "网络错误: \(ns.localizedDescription)"
+        }
+        switch ns.code {
+        case NSURLErrorTimedOut:                       // -1001
+            return "连接服务器超时，请检查网络、地址与端口后重试（错误码 \(ns.code)）"
+        case NSURLErrorCannotFindHost:                 // -1003
+            return "无法找到服务器主机，请检查地址是否正确（错误码 \(ns.code)）"
+        case NSURLErrorCannotConnectToHost:            // -1004
+            return "无法连接到服务器，请检查协议与端口是否正确（Emby 反向代理常用 443，默认为 HTTP 8096 / HTTPS 8920，错误码 \(ns.code)）"
+        case NSURLErrorNetworkConnectionLost:          // -1005
+            return "网络连接中断，请重试（错误码 \(ns.code)）"
+        case NSURLErrorDNSLookupFailed:                // -1006
+            return "DNS 解析失败，无法找到该主机名（错误码 \(ns.code)）"
+        case NSURLErrorNotConnectedToInternet:         // -1009
+            return "设备未连接到互联网，请检查网络后重试（错误码 \(ns.code)）"
+        case NSURLErrorAppTransportSecurityRequiresSecureConnection: // -1022
+            return "App 安全策略（ATS）阻止了该连接，请使用 HTTPS 地址（错误码 \(ns.code)）"
+        case NSURLErrorSecureConnectionFailed,         // -1200
+             NSURLErrorServerCertificateHasBadDate,    // -1201
+             NSURLErrorServerCertificateUntrusted,     // -1202
+             NSURLErrorServerCertificateHasUnknownRoot,// -1203
+             NSURLErrorServerCertificateNotYetValid:   // -1204
+            return "安全连接（TLS）失败：服务器证书不受信任（自签名/已过期/主机名不匹配），可开启「跳过 SSL 验证」后重试；若仍失败请检查协议与端口（Emby 反向代理常用 443，默认为 HTTP 8096 / HTTPS 8920，错误码 \(ns.code)）"
+        default:
+            return "网络错误（\(ns.code)）: \(ns.localizedDescription)"
         }
     }
 }
@@ -44,6 +97,11 @@ public final class EmbyClient {
     private let sessionHolder: SessionDelegate
     private let jsonDecoder: JSONDecoder
 
+    /// 证书信任状态会在 URLSession 后台委托队列上被读取，必须加锁保护
+    private let trustLock = NSLock()
+    /// 已确认「跳过 SSL 验证」的主机（小写 host）；命中则信任其自签名 / 无效证书
+    private var trustedHosts: Set<String> = []
+
     private init() {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 30
@@ -60,21 +118,47 @@ public final class EmbyClient {
         self.jsonDecoder = JSONDecoder()
         self.jsonDecoder.keyDecodingStrategy = .useDefaultKeys
         self.jsonDecoder.dateDecodingStrategy = .iso8601
+
+        holder.client = self
     }
 
-    /// URLSession 委托：当前服务器开启 skipSSL 时信任自签名证书
+    /// URLSession 委托：命中「跳过 SSL 验证」主机时信任自签名证书
     final class SessionDelegate: NSObject, URLSessionDelegate {
+        weak var client: EmbyClient?
+
         func urlSession(_ session: URLSession,
                         didReceive challenge: URLAuthenticationChallenge,
                         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
             guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-                  EmbyClient.shared.currentServer?.skipSSL == true,
-                  let trust = challenge.protectionSpace.serverTrust else {
+                  let trust = challenge.protectionSpace.serverTrust,
+                  let client,
+                  client.shouldTrustServer(host: challenge.protectionSpace.host) else {
                 completionHandler(.performDefaultHandling, nil)
                 return
             }
             completionHandler(.useCredential, URLCredential(trust: trust))
         }
+    }
+
+    // MARK: - TLS 证书信任
+
+    /// 供 URLSession / Kingfisher 的证书挑战回调（可能在后台线程）查询是否信任该主机
+    public func shouldTrustServer(host: String) -> Bool {
+        trustLock.lock()
+        defer { trustLock.unlock() }
+        return trustedHosts.contains(host.lowercased())
+    }
+
+    private func setTrustedHosts(_ hosts: Set<String>) {
+        trustLock.lock()
+        trustedHosts = Set(hosts.map { $0.lowercased() })
+        trustLock.unlock()
+    }
+
+    private func snapshotTrustedHosts() -> Set<String> {
+        trustLock.lock()
+        defer { trustLock.unlock() }
+        return trustedHosts
     }
     
     // MARK: - Setup / Auth
@@ -82,6 +166,7 @@ public final class EmbyClient {
     public func setServer(_ server: EmbyServer) {
         self.currentServer = server
         self.accessToken = server.accessToken
+        setTrustedHosts(server.skipSSL ? [server.host] : [])
         if let uid = server.userId, uid.isEmpty == false {
             self.currentUser = EmbyUser(
                 id: uid,
@@ -195,7 +280,7 @@ public final class EmbyClient {
                 } catch {
                     // Try to decode error response
                     if let errResp = try? jsonDecoder.decode(EmbyErrorResponse.self, from: data) {
-                        throw EmbyAPIError.serverError(errResp.message ?? errResp.message ?? "Unknown Error")
+                        throw EmbyAPIError.serverError(errResp.Message ?? errResp.message ?? "Unknown Error")
                     }
                     throw EmbyAPIError.decodingError(error)
                 }
@@ -234,49 +319,86 @@ extension EmbyClient {
     public func getPublicSystemInfo(baseURL: String, skipSSL: Bool = false) async throws -> PublicSystemInfo {
         guard let temp = EmbyServer(baseURLString: baseURL) else { throw EmbyAPIError.invalidURL }
         let savedServer = currentServer
-        defer { currentServer = savedServer }
+        let savedHosts = snapshotTrustedHosts()
+        defer {
+            currentServer = savedServer
+            setTrustedHosts(savedHosts)
+        }
 
         currentServer = temp
-        currentServer?.skipSSL = skipSSL
+        setTrustedHosts(skipSSL ? [temp.host] : [])
         return try await request(method: "GET", path: "/emby/System/Info/Public")
     }
 
     /// Get public users on server (for login screen user picker).
+    /// 注意：Emby 的 `/Users/Public` 实际返回**裸数组**（隐藏用户时为 `[]`），
+    /// 不能按 QueryResult 包装解码；这里直接取原始数据，先试裸数组再试包装格式。
     /// - Parameters:
     ///   - baseURL: 完整基础地址（含协议/端口/子路径）
     ///   - skipSSL: 是否信任自签名证书
     public func getPublicUsers(baseURL: String, skipSSL: Bool = false) async throws -> [EmbyUser] {
         guard let temp = EmbyServer(baseURLString: baseURL) else { throw EmbyAPIError.invalidURL }
         let savedServer = currentServer
-        defer { currentServer = savedServer }
+        let savedHosts = snapshotTrustedHosts()
+        defer {
+            currentServer = savedServer
+            setTrustedHosts(savedHosts)
+        }
 
         currentServer = temp
-        currentServer?.skipSSL = skipSSL
-        let result: QueryResult<EmbyUser> = try await request(
-            method: "GET",
-            path: "/emby/Users/Public"
-        )
-        // Some Emby versions return array directly
-        if result.items.isEmpty {
-            do {
-                guard let url = buildURL(path: "/emby/Users/Public") else { return [] }
-                var req = URLRequest(url: url)
-                authHeaders().forEach { req.addValue($1, forHTTPHeaderField: $0) }
-                let (data, _) = try await session.data(for: req)
+        setTrustedHosts(skipSSL ? [temp.host] : [])
+
+        guard let url = buildURL(path: "/emby/Users/Public") else { throw EmbyAPIError.invalidURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        authHeaders().forEach { req.addValue($1, forHTTPHeaderField: $0) }
+
+        do {
+            let (data, response) = try await session.data(for: req)
+            guard let http = response as? HTTPURLResponse else { throw EmbyAPIError.invalidResponse }
+            switch http.statusCode {
+            case 200...299:
+                // Emby 标准：裸数组
                 if let arr = try? jsonDecoder.decode([EmbyUser].self, from: data) {
                     return arr
                 }
-            } catch {}
+                // 兼容个别返回 QueryResult 包装的版本
+                if let wrapped = try? jsonDecoder.decode(QueryResult<EmbyUser>.self, from: data) {
+                    return wrapped.items
+                }
+                throw EmbyAPIError.decodingError(
+                    NSError(domain: "EmbyClient", code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "公开用户列表响应格式无法解析"])
+                )
+            case 401:
+                throw EmbyAPIError.unauthorized
+            case 404:
+                throw EmbyAPIError.notFound
+            default:
+                let msg = String(data: data, encoding: .utf8) ?? ""
+                throw EmbyAPIError.httpError(statusCode: http.statusCode, message: msg)
+            }
+        } catch let err as EmbyAPIError {
+            throw err
+        } catch {
+            if (error as NSError).domain == NSURLErrorDomain && (error as NSError).code == NSURLErrorCancelled {
+                throw EmbyAPIError.cancelled
+            }
+            throw EmbyAPIError.networkError(error)
         }
-        return result.items
     }
     
     /// Authenticate with username / password.
     public func login(server: EmbyServer, username: String, password: String) async throws -> EmbyAuthResult {
         let savedServer = currentServer
+        let savedHosts = snapshotTrustedHosts()
         currentServer = server
-        defer { currentServer = savedServer }
-        
+        setTrustedHosts(server.skipSSL ? [server.host] : [])
+        defer {
+            currentServer = savedServer
+            setTrustedHosts(savedHosts)
+        }
+
         var body: [String: String] = [
             "Username": username
         ]

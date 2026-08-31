@@ -51,15 +51,87 @@ public struct EmbyServer: Codable, Identifiable, Equatable, Hashable {
     public init?(baseURLString: String, name: String = "") {
         var str = baseURLString.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !str.isEmpty else { return nil }
-        if !str.contains("://") { str = "http://" + str }
+        if !str.contains("://") { str = "https://" + str }
         guard let comps = URLComponents(string: str), let host = comps.host, !host.isEmpty else { return nil }
         self.init(
             name: name,
-            scheme: comps.scheme ?? "http",
+            scheme: comps.scheme ?? "https",
             host: host,
             port: comps.port,
             path: comps.path.isEmpty ? nil : comps.path
         )
+    }
+
+    /// 智能解析用户在「服务器地址」栏输入的内容：
+    /// - 支持粘贴完整 URL（`https://emby.taotu.ink:443`、`http://192.168.1.10:8096/emby`）
+    /// - 支持只填主机 / IP（`emby.taotu.ink`、`192.168.1.10:8920`），缺协议时默认 HTTPS
+    public static func parse(address raw: String, name: String = "", remark: String? = nil, username: String? = nil) -> EmbyServer? {
+        var str = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !str.isEmpty else { return nil }
+        // 容错：误输入重复协议头（如 https://https://host），只保留最后一个
+        while true {
+            let lower = str.lowercased()
+            if lower.hasPrefix("https://https://") || lower.hasPrefix("https://http://") {
+                str = String(str.dropFirst("https://".count))
+            } else if lower.hasPrefix("http://http://") || lower.hasPrefix("http://https://") {
+                str = String(str.dropFirst("http://".count))
+            } else {
+                break
+            }
+        }
+        if !str.lowercased().hasPrefix("http://"), !str.lowercased().hasPrefix("https://") {
+            str = "https://" + str
+        }
+        guard let comps = URLComponents(string: str), let host = comps.host, !host.isEmpty else { return nil }
+        var path = comps.path
+        while path.hasSuffix("/") { path.removeLast() }
+        return EmbyServer(
+            name: name,
+            remark: remark,
+            scheme: comps.scheme ?? "https",
+            host: host,
+            port: comps.port,
+            path: path.isEmpty ? nil : path,
+            username: username
+        )
+    }
+
+    /// 生成连接尝试候选列表：
+    /// - 用户写了协议（http:// 或 https://）→ 只试该地址
+    /// - 没写协议 → 依次尝试 https(443)、http(80)，以及 Emby 常见默认端口 https(8920)、http(8096)
+    public static func candidates(
+        from address: String,
+        name: String = "",
+        remark: String? = nil,
+        username: String? = nil,
+        skipSSL: Bool = false
+    ) -> [EmbyServer] {
+        let raw = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let parsed = parse(address: raw, name: name, remark: remark, username: username) else { return [] }
+        let hadScheme = raw.lowercased().contains("://")
+
+        func make(_ scheme: String, _ port: Int?) -> EmbyServer {
+            var s = parsed
+            s.scheme = scheme
+            s.port = port
+            s.skipSSL = skipSSL
+            return s
+        }
+
+        if hadScheme {
+            return [parsed]
+        }
+        var list: [EmbyServer] = [
+            make("https", 443),
+            make("http", 80)
+        ]
+        if parsed.port == nil {
+            list.append(make("https", 8920))
+            list.append(make("http", 8096))
+        }
+        // 去重（同 scheme/host/port/path 只试一次）
+        var seen = Set<String>()
+        return list.filter { seen.insert($0.id).inserted }
     }
 
     /// 规范化后的子路径：保证以 "/" 开头、不以 "/" 结尾；空路径返回 ""
@@ -98,11 +170,34 @@ public struct EmbyUser: Codable, Identifiable, Equatable, Hashable {
     public let serverId: String?
     public let hasPassword: Bool
     public let hasConfiguredPassword: Bool
+    /// 注意：Emby 的 User DTO 顶层并不总是返回 IsAdministrator/IsDisabled（它们在 Policy 内），必须容错
     public let isAdministrator: Bool
     public let isDisabled: Bool
     public let policy: UserPolicy?
     public let configuration: UserConfiguration?
-    
+
+    public init(
+        id: String,
+        name: String,
+        serverId: String? = nil,
+        hasPassword: Bool = false,
+        hasConfiguredPassword: Bool = false,
+        isAdministrator: Bool = false,
+        isDisabled: Bool = false,
+        policy: UserPolicy? = nil,
+        configuration: UserConfiguration? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.serverId = serverId
+        self.hasPassword = hasPassword
+        self.hasConfiguredPassword = hasConfiguredPassword
+        self.isAdministrator = isAdministrator
+        self.isDisabled = isDisabled
+        self.policy = policy
+        self.configuration = configuration
+    }
+
     enum CodingKeys: String, CodingKey {
         case id = "Id"
         case name = "Name"
@@ -114,17 +209,37 @@ public struct EmbyUser: Codable, Identifiable, Equatable, Hashable {
         case policy = "Policy"
         case configuration = "Configuration"
     }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        serverId = try? c.decodeIfPresent(String.self, forKey: .serverId)
+        hasPassword = (try? c.decodeIfPresent(Bool.self, forKey: .hasPassword)) ?? false
+        hasConfiguredPassword = (try? c.decodeIfPresent(Bool.self, forKey: .hasConfiguredPassword)) ?? false
+        isAdministrator = (try? c.decodeIfPresent(Bool.self, forKey: .isAdministrator)) ?? false
+        isDisabled = (try? c.decodeIfPresent(Bool.self, forKey: .isDisabled)) ?? false
+        policy = try? c.decodeIfPresent(UserPolicy.self, forKey: .policy)
+        configuration = try? c.decodeIfPresent(UserConfiguration.self, forKey: .configuration)
+    }
 }
 
 public struct UserPolicy: Codable, Equatable, Hashable {
     public let isAdministrator: Bool
     public let isHidden: Bool
     public let isDisabled: Bool
-    
+
     enum CodingKeys: String, CodingKey {
         case isAdministrator = "IsAdministrator"
         case isHidden = "IsHidden"
         case isDisabled = "IsDisabled"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        isAdministrator = (try? c.decodeIfPresent(Bool.self, forKey: .isAdministrator)) ?? false
+        isHidden = (try? c.decodeIfPresent(Bool.self, forKey: .isHidden)) ?? false
+        isDisabled = (try? c.decodeIfPresent(Bool.self, forKey: .isDisabled)) ?? false
     }
 }
 
@@ -133,12 +248,20 @@ public struct UserConfiguration: Codable, Equatable, Hashable {
     public let subtitleLanguagePreference: String?
     public let playDefaultAudioTrack: Bool
     public let displayMissingEpisodes: Bool
-    
+
     enum CodingKeys: String, CodingKey {
         case audioLanguagePreference = "AudioLanguagePreference"
         case subtitleLanguagePreference = "SubtitleLanguagePreference"
         case playDefaultAudioTrack = "PlayDefaultAudioTrack"
         case displayMissingEpisodes = "DisplayMissingEpisodes"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        audioLanguagePreference = try? c.decodeIfPresent(String.self, forKey: .audioLanguagePreference)
+        subtitleLanguagePreference = try? c.decodeIfPresent(String.self, forKey: .subtitleLanguagePreference)
+        playDefaultAudioTrack = (try? c.decodeIfPresent(Bool.self, forKey: .playDefaultAudioTrack)) ?? true
+        displayMissingEpisodes = (try? c.decodeIfPresent(Bool.self, forKey: .displayMissingEpisodes)) ?? false
     }
 }
 

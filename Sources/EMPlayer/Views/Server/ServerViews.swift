@@ -5,18 +5,13 @@ import EMPlayerCore
 
 struct ServerAddView: View {
     @EnvironmentObject var appState: AppState
-    @EnvironmentObject var serverStore: ServerStore
     @Environment(\.dismiss) private var dismiss
 
+    // 服务器地址（单字段，支持粘贴完整 URL）
+    @State private var address: String = ""
     // 基本信息
     @State private var name: String = ""
     @State private var remark: String = ""
-    // 连接信息
-    @State private var scheme: String = "https"
-    @State private var host: String = ""
-    @State private var path: String = ""
-    @State private var port: String = "443"
-    @State private var userEditedPort: Bool = false
     // 凭据
     @State private var username: String = ""
     @State private var password: String = ""
@@ -27,65 +22,29 @@ struct ServerAddView: View {
     @State private var isLoading: Bool = false
     @State private var errorMsg: String?
 
-    private var trimmedHost: String {
-        host.trimmingCharacters(in: .whitespacesAndNewlines)
+    private var trimmedAddress: String {
+        address.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var canSubmit: Bool {
-        !isLoading && !trimmedHost.isEmpty &&
+        !isLoading && !trimmedAddress.isEmpty &&
         !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var body: some View {
         NavigationStack {
             Form {
-                // MARK: 名称 / 备注
+                // MARK: 服务器地址
                 Section {
-                    fieldRow(label: "名称", placeholder: "名称（可选）", text: $name)
-                    fieldRow(label: "备注", placeholder: "备注（可选）", text: $remark)
+                    fieldRow(label: "地址", placeholder: "https://emby.taotu.ink", text: $address, keyboard: .URL)
+                } footer: {
+                    Text("可直接粘贴完整网址（含端口/路径，如 https://emby.taotu.ink:443）；不填协议时会自动尝试 HTTPS（443、8920）与 HTTP（80、8096）。")
                 }
 
-                // MARK: 协议 / 主机 / 路径 / 端口
+                // MARK: 名称 / 备注
                 Section {
-                    HStack {
-                        Text("协议")
-                        Spacer()
-                        Menu {
-                            Button {
-                                switchScheme("https")
-                            } label: {
-                                if scheme == "https" { Label("HTTPS", systemImage: "checkmark") } else { Text("HTTPS") }
-                            }
-                            Button {
-                                switchScheme("http")
-                            } label: {
-                                if scheme == "http" { Label("HTTP", systemImage: "checkmark") } else { Text("HTTP") }
-                            }
-                        } label: {
-                            HStack(spacing: 6) {
-                                Text(scheme.uppercased())
-                                    .foregroundStyle(.primary)
-                                Image(systemName: "chevron.right")
-                                    .font(.caption2.weight(.semibold))
-                                    .foregroundStyle(.tertiary)
-                            }
-                        }
-                    }
-
-                    fieldRow(label: "主机", placeholder: "主机（必填）", text: $host, keyboard: .URL)
-                    fieldRow(label: "路径", placeholder: "路径（可选）", text: $path, keyboard: .URL)
-                    HStack {
-                        Text("端口")
-                        Spacer()
-                        TextField(scheme == "https" ? "443" : "8096", text: $port)
-                            .keyboardType(.numberPad)
-                            .multilineTextAlignment(.trailing)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: 120)
-                            .onChange(of: port) { _, newValue in
-                                userEditedPort = !newValue.isEmpty
-                            }
-                    }
+                    fieldRow(label: "名称", placeholder: "名称（可选，默认用服务器名）", text: $name)
+                    fieldRow(label: "备注", placeholder: "备注（可选）", text: $remark)
                 }
 
                 // MARK: 用户名 / 密码
@@ -97,9 +56,9 @@ struct ServerAddView: View {
                         Spacer()
                         Group {
                             if showPassword {
-                                TextField("密码（可选）", text: $password)
+                                TextField("密码", text: $password)
                             } else {
-                                SecureField("密码（可选）", text: $password)
+                                SecureField("密码", text: $password)
                             }
                         }
                         .multilineTextAlignment(.trailing)
@@ -121,7 +80,7 @@ struct ServerAddView: View {
                         Text("跳过 SSL 验证")
                     }
                 } footer: {
-                    Text("仅允许用于信任的网络环境")
+                    Text("适用于自签名证书或 IP 直连 HTTPS 的服务器。首次连接遇到证书错误时 App 会自动跳过校验并重试；仅建议在可信网络中开启。")
                 }
 
                 // MARK: 提交
@@ -185,47 +144,21 @@ struct ServerAddView: View {
 
     // MARK: - 动作
 
-    private func switchScheme(_ newScheme: String) {
-        let oldDefault = scheme == "https" ? "443" : "8096"
-        scheme = newScheme
-        // 用户没手动改过端口（或仍为旧协议默认值）时，自动切换为新协议默认端口
-        if !userEditedPort || port.isEmpty || port == oldDefault {
-            port = newScheme == "https" ? "443" : "8096"
-            userEditedPort = false
-        }
-    }
-
-    private func makeServer() -> EmbyServer {
-        let portValue = Int(port.filter { $0.isNumber })
-        let rawPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
-        var normalizedPath: String? = nil
-        if !rawPath.isEmpty {
-            var p = rawPath
-            while p.hasSuffix("/") { p.removeLast() }
-            if !p.hasPrefix("/") { p = "/" + p }
-            normalizedPath = p
-        }
-        return EmbyServer(
-            name: name.trimmingCharacters(in: .whitespacesAndNewlines),
-            remark: remark.isEmpty ? nil : remark,
-            scheme: scheme,
-            host: trimmedHost,
-            port: portValue,
-            path: normalizedPath,
-            skipSSL: skipSSL,
-            username: username.trimmingCharacters(in: .whitespacesAndNewlines)
-        )
-    }
-
     private func submit() async {
         guard canSubmit else { return }
         isLoading = true
         errorMsg = nil
         defer { isLoading = false }
 
-        let server = makeServer()
         do {
-            try await appState.configureServer(server, username: username, password: password)
+            try await appState.addServer(
+                address: trimmedAddress,
+                displayName: name,
+                remark: remark,
+                username: username,
+                password: password,
+                skipSSL: skipSSL
+            )
             dismiss()
         } catch {
             errorMsg = "连接失败：\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
@@ -490,7 +423,7 @@ struct ServerEditView: View {
                         Text("跳过 SSL 验证")
                     }
                 } footer: {
-                    Text("仅允许用于信任的网络环境")
+                    Text("适用于自签名证书或 IP 直连 HTTPS 的服务器（Emby HTTPS 默认端口 8920）。首次连接遇到证书错误时 App 会自动跳过校验重试；仅建议在可信网络中开启。")
                 }
 
                 Section {

@@ -299,11 +299,6 @@ struct ServerRow: View {
                             .font(.caption2)
                             .foregroundStyle(.orange)
                     }
-                    if let date = server.lastConnected {
-                        Text(date, style: .relative)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
                 }
             }
 

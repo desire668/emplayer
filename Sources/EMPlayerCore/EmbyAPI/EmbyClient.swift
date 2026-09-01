@@ -25,7 +25,11 @@ public enum EmbyAPIError: Error, LocalizedError {
         case .unauthorized: return "未授权，请重新登录"
         case .invalidCredentials: return "用户名或密码错误，请检查后重试"
         case .notFound: return "资源未找到（服务器地址或路径可能不正确）"
-        case .decodingError(let err): return "数据解析失败: \(err.localizedDescription)"
+        case .decodingError(let err):
+            if let d = err as? DecodingError {
+                return "数据解析失败: \(EmbyAPIError.describeDecodingError(d))"
+            }
+            return "数据解析失败: \(err.localizedDescription)"
         case .networkError(let err): return EmbyAPIError.friendlyNetworkMessage(err)
         case .serverError(let msg): return "服务器错误: \(msg)"
         case .cancelled: return "请求已取消"
@@ -49,6 +53,27 @@ public enum EmbyAPIError: Error, LocalizedError {
             return true
         default:
             return false
+        }
+    }
+
+    /// 把 DecodingError 格式化为带字段路径的可读信息，便于定位模型与服务器响应不匹配的问题
+    static func describeDecodingError(_ error: DecodingError) -> String {
+        let path: (DecodingError.Context) -> String = { ctx in
+            ctx.codingPath.map { $0.stringValue }.joined(separator: ".")
+        }
+        switch error {
+        case .keyNotFound(let key, let ctx):
+            let full = (ctx.codingPath + [key]).map { $0.stringValue }.joined(separator: ".")
+            return "缺少字段 \(full)"
+        case .typeMismatch(let type, let ctx):
+            let p = path(ctx)
+            return "字段 \(p) 类型不匹配（期望 \(type)）\(ctx.debugDescription.isEmpty ? "" : "：\(ctx.debugDescription)")"
+        case .valueNotFound(let type, let ctx):
+            return "字段 \(path(ctx)) 的值为 null（期望 \(type)）"
+        case .dataCorrupted(let ctx):
+            return "数据损坏：\(ctx.debugDescription)"
+        @unknown default:
+            return error.localizedDescription
         }
     }
 
@@ -278,9 +303,13 @@ public final class EmbyClient {
                 do {
                     return try jsonDecoder.decode(T.self, from: data)
                 } catch {
-                    // Try to decode error response
-                    if let errResp = try? jsonDecoder.decode(EmbyErrorResponse.self, from: data) {
-                        throw EmbyAPIError.serverError(errResp.Message ?? errResp.message ?? "Unknown Error")
+                    // 仅当响应体确实是「带非空消息的错误对象」时才按服务器错误处理；
+                    // EmbyErrorResponse 的字段全为可选，任何 JSON 都能解码成功，
+                    // 若不校验消息内容，成功响应的模型不匹配会被误报为「服务器错误: Unknown Error」
+                    if let errResp = try? jsonDecoder.decode(EmbyErrorResponse.self, from: data),
+                       let msg = errResp.Message ?? errResp.message,
+                       !msg.isEmpty {
+                        throw EmbyAPIError.serverError(msg)
                     }
                     throw EmbyAPIError.decodingError(error)
                 }

@@ -456,11 +456,30 @@ public struct UserData: Codable, Equatable, Hashable {
 
 public struct NameIdPair: Codable, Equatable, Hashable {
     public let name: String
-    public let id: String
-    
+    /// 注意：Emby 的 Studios 返回 NameLongIdPair（Id 为数字，可能为 null），
+    /// Jellyfin 才返回字符串 GUID；这里统一容错解码
+    public let id: String?
+
+    public init(name: String, id: String? = nil) {
+        self.name = name
+        self.id = id
+    }
+
     enum CodingKeys: String, CodingKey {
         case name = "Name"
         case id = "Id"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        if let s = try? c.decodeIfPresent(String.self, forKey: .id), let s {
+            id = s
+        } else if let n = try? c.decodeIfPresent(Int64.self, forKey: .id), let n {
+            id = String(n)
+        } else {
+            id = nil
+        }
     }
 }
 

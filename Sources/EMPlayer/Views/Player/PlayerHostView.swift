@@ -119,6 +119,8 @@ struct PlayerHostView: View {
     var body: some View {
         GeometryReader { geo in
             let isLandscape = geo.size.width > geo.size.height
+            let topInset = isLandscape ? 0 : geo.safeAreaInsets.top + 14
+
             ZStack(alignment: .top) {
                 Color.black.ignoresSafeArea()
 
@@ -126,16 +128,18 @@ struct PlayerHostView: View {
                     loadingView
                 } else if let url = playbackURL {
                     VStack(spacing: 0) {
-                        // 横屏：视频铺满；竖屏：视频保持 16:9，从状态栏/灵动岛下方开始
+                        // 横屏：视频铺满；竖屏：视频保持 16:9，从灵动岛下方额外留 14pt 间距
                         videoArea(url: url, isLandscape: isLandscape)
-                            .frame(height: isLandscape ? geo.size.height : geo.size.width * 9.0 / 16.0)
+                            .frame(width: isLandscape ? geo.size.width : geo.size.width,
+                                   height: isLandscape ? geo.size.height : geo.size.width * 9.0 / 16.0)
                             .clipped()
 
                         if !isLandscape {
                             portraitInfoView
                         }
                     }
-                    .padding(.top, isLandscape ? 0 : geo.safeAreaInsets.top)
+                    .frame(width: geo.size.width)
+                    .padding(.top, topInset)
                 } else {
                     fatalView
                 }
@@ -315,30 +319,36 @@ struct PlayerHostView: View {
         }
     }
 
+    // MARK: - 玻璃胶囊风格顶栏（参考图2）
+
     private func topBar(isLandscape: Bool) -> some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 14) {
+            // 关闭
             Button {
                 dismiss()
             } label: {
                 Image(systemName: "xmark")
-                        .font(.system(size: 20, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(width: 40, height: 40)
-                        .background(.black.opacity(0.35), in: Circle())
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.white)
             }
-            Text(item.name)
+            .frame(width: 36, height: 36)
+            .background(.ultraThinMaterial, in: Capsule())
+
+            // 标题（居中）
+            Text(MediaTypeUtils.displayTitle(item))
                 .font(.headline)
                 .foregroundStyle(.white)
                 .lineLimit(1)
-            Spacer()
+                .frame(maxWidth: .infinity)
+
+            // Emby 菜单
             embyMenu
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(
-            LinearGradient(colors: [.black.opacity(0.55), .clear], startPoint: .top, endPoint: .bottom)
-                .ignoresSafeArea(edges: .top)
-        )
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: Capsule())
+        .padding(.horizontal, 16)
+        .padding(.top, isLandscape ? 10 : 0)
     }
 
     /// Emby 专属菜单（媒体源 / 播放模式）
@@ -369,20 +379,95 @@ struct PlayerHostView: View {
             }
         } label: {
             Image(systemName: "ellipsis.circle")
-                .font(.system(size: 24))
+                .font(.system(size: 20))
                 .foregroundStyle(.white)
-                .frame(width: 40, height: 40)
-                .background(.black.opacity(0.35), in: Circle())
         }
+        .frame(width: 36, height: 36)
+        .background(.ultraThinMaterial, in: Capsule())
     }
 
+    // MARK: - 玻璃胶囊风格底栏（参考图2）
+
     private func bottomBar(isLandscape: Bool) -> some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 10) {
+            // 按钮胶囊：左-播放锁定 | 中-控制组 | 右-菜单组
+            HStack(spacing: 14) {
+                // 左：播放锁定
+                Button {
+                    isLocked = true
+                    coordinator.mask(show: true)
+                } label: {
+                    Image(systemName: "lock.open.fill")
+                        .font(.system(size: 18))
+                        .foregroundStyle(.white)
+                }
+
+                Spacer()
+
+                // 中：控制组（居中）
+                HStack(spacing: 18) {
+                    // 快退 15 秒
+                    Button {
+                        coordinator.skip(interval: -15)
+                    } label: {
+                        Image(systemName: "gobackward.15")
+                            .font(.system(size: 20))
+                            .foregroundStyle(.white)
+                    }
+                    // 播放 / 暂停
+                    Button {
+                        if coordinator.state.isPlaying {
+                            coordinator.playerLayer?.pause()
+                        } else {
+                            coordinator.playerLayer?.play()
+                        }
+                    } label: {
+                        Image(systemName: coordinator.state.isPlaying ? "pause.fill" : "play.fill")
+                            .font(.system(size: 26, weight: .medium))
+                            .foregroundStyle(.white)
+                    }
+                    // 快进 15 秒
+                    Button {
+                        coordinator.skip(interval: 15)
+                    } label: {
+                        Image(systemName: "goforward.15")
+                            .font(.system(size: 20))
+                            .foregroundStyle(.white)
+                    }
+                }
+
+                Spacer()
+
+                // 右：菜单组
+                HStack(spacing: 14) {
+                    audioTrackMenu
+                    subtitleMenu
+                    scaleModeMenu
+                    playbackRateMenu
+                    // 横竖屏切换
+                    Button {
+                        if isLandscape {
+                            OrientationManager.shared.rotateToPortrait()
+                        } else {
+                            OrientationManager.shared.rotateToLandscape()
+                        }
+                    } label: {
+                        Image(systemName: isLandscape ? "rectangle.portrait.rotate" : "rectangle.landscape.rotate")
+                            .font(.system(size: 18))
+                            .foregroundStyle(.white)
+                    }
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            .background(.ultraThinMaterial, in: Capsule())
+
             // 进度条 + 时间
             HStack(spacing: 10) {
                 Text(timeString(Int(coordinator.timemodel.currentTime)))
                     .font(.footnote.monospacedDigit())
                     .foregroundStyle(.white)
+                    .frame(width: 48, alignment: .leading)
                 Slider(
                     value: Binding(
                         get: { isSeeking ? seekValue : Double(coordinator.timemodel.currentTime) },
@@ -400,76 +485,14 @@ struct PlayerHostView: View {
                 Text(timeString(coordinator.timemodel.totalTime))
                     .font(.footnote.monospacedDigit())
                     .foregroundStyle(.white)
+                    .frame(width: 48, alignment: .trailing)
             }
-
-            // 按钮行
-            HStack(spacing: 26) {
-                // 播放锁定
-                Button {
-                    isLocked = true
-                    coordinator.mask(show: true)
-                } label: {
-                    Image(systemName: "lock.open.fill")
-                        .font(.system(size: 22))
-                        .foregroundStyle(.white)
-                }
-
-                // 播放 / 暂停
-                Button {
-                    if coordinator.state.isPlaying {
-                        coordinator.playerLayer?.pause()
-                    } else {
-                        coordinator.playerLayer?.play()
-                    }
-                } label: {
-                    Image(systemName: coordinator.state.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 28, weight: .medium))
-                        .foregroundStyle(.white)
-                }
-
-                // 快退 / 快进 15 秒
-                Button {
-                    coordinator.skip(interval: -15)
-                } label: {
-                    Image(systemName: "gobackward.15")
-                        .font(.system(size: 24))
-                        .foregroundStyle(.white)
-                }
-                Button {
-                    coordinator.skip(interval: 15)
-                } label: {
-                    Image(systemName: "goforward.15")
-                        .font(.system(size: 24))
-                        .foregroundStyle(.white)
-                }
-
-                Spacer()
-
-                audioTrackMenu
-                subtitleMenu
-                scaleModeMenu
-                playbackRateMenu
-
-                // 横竖屏切换（右下角）
-                Button {
-                    if isLandscape {
-                        OrientationManager.shared.rotateToPortrait()
-                    } else {
-                        OrientationManager.shared.rotateToLandscape()
-                    }
-                } label: {
-                    Image(systemName: isLandscape ? "rectangle.portrait.rotate" : "rectangle.landscape.rotate")
-                        .font(.system(size: 22))
-                        .foregroundStyle(.white)
-                }
-            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(.ultraThinMaterial, in: Capsule())
         }
         .padding(.horizontal, 16)
-        .padding(.bottom, 12)
-        .padding(.top, 28)
-        .background(
-            LinearGradient(colors: [.clear, .black.opacity(0.55)], startPoint: .top, endPoint: .bottom)
-        )
+        .padding(.bottom, isLandscape ? 18 : 12)
     }
 
     /// 画面比例（适应 / 填充 / 拉伸）

@@ -740,10 +740,10 @@ extension EmbyClient {
         guard let server = currentServer else { return nil }
         guard let itemId = Optional(itemId), !itemId.isEmpty else { return nil }
         let base = server.baseURL()
-        // tag 可选：有 tag 时走缓存路径，无 tag 时仍可请求（Emby 返回当前图片）
-        var path = "/emby/Items/\(itemId)/Images/\(type)"
-        if let tag = tag, !tag.isEmpty { path += "/\(tag)" }
+        // tag 一律作为 query 参数（路径式 /Images/Primary/{tag} 仅 Emby 支持，Jellyfin 会返回 400）
+        let path = "/emby/Items/\(itemId)/Images/\(type)"
         var queryParts: [String] = []
+        if let tag = tag, !tag.isEmpty { queryParts.append("tag=\(tag)") }
         if let w = width { queryParts.append("Width=\(w)") }
         if let h = height { queryParts.append("Height=\(h)") }
         if let mw = maxWidth { queryParts.append("MaxWidth=\(mw)") }
@@ -754,25 +754,27 @@ extension EmbyClient {
         let qs = queryParts.isEmpty ? "" : "?" + queryParts.joined(separator: "&")
         return URL(string: base + path + qs)
     }
-    
+
     public func primaryImageURL(for item: MediaItem, maxWidth: Int = 500) -> URL? {
         imageURL(itemId: item.id, tag: item.imageTags?.primary, type: "Primary", maxWidth: maxWidth)
     }
-    
+
     public func thumbImageURL(for item: MediaItem, maxWidth: Int = 800) -> URL? {
-        let tag = item.imageTags?.thumb ?? item.imageTags?.primary
-        return imageURL(itemId: item.id, tag: tag, type: "Thumb", maxWidth: maxWidth) ?? primaryImageURL(for: item, maxWidth: maxWidth)
+        // 无 Thumb tag 时直接用主图（无 tag 的 Thumb 请求在服务器上通常 404）
+        if let tag = item.imageTags?.thumb, !tag.isEmpty {
+            return imageURL(itemId: item.id, tag: tag, type: "Thumb", maxWidth: maxWidth)
+        }
+        return primaryImageURL(for: item, maxWidth: maxWidth)
     }
-    
+
     public func backdropURL(for item: MediaItem, index: Int = 0, maxWidth: Int = 1920) -> URL? {
         let tags = item.backdropImageTags ?? []
         if index < tags.count {
             let tag = tags[index]
             return imageURL(itemId: item.id, tag: tag, type: "Backdrop", maxWidth: maxWidth)
         }
-        // 无 backdrop tag 时回退到无 tag 请求或 Primary
-        return imageURL(itemId: item.id, tag: nil, type: "Backdrop", maxWidth: maxWidth)
-            ?? primaryImageURL(for: item, maxWidth: maxWidth)
+        // 无 backdrop tag 时回退主图
+        return primaryImageURL(for: item, maxWidth: maxWidth)
     }
     
     public func logoImageURL(for item: MediaItem) -> URL? {

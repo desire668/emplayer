@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import AVFoundation
 import EMPlayerCore
 import KSPlayer
@@ -56,6 +57,12 @@ struct PlayerHostView: View {
     @State private var isSeeking: Bool = false
     @State private var seekValue: Double = 0
 
+    // 字幕渲染层状态（SubtitleModel 为嵌套 ObservableObject，onReceive 手动同步）
+    @State private var subtitleParts: [SubtitlePart] = []
+
+    // 画面比例
+    @State private var scaleMode: ScaleMode = .fit
+
     // 上报 / 重建控制
     @State private var reporterActive: Bool = false
     @State private var finishedCurrent: Bool = false
@@ -69,6 +76,22 @@ struct PlayerHostView: View {
         case directStream = "直连"
         case hlsTranscode = "HLS 转码"
         var id: String { rawValue }
+    }
+
+    /// 画面比例模式
+    enum ScaleMode: String, CaseIterable, Identifiable {
+        case fit = "适应"
+        case fill = "填充"
+        case stretch = "拉伸"
+        var id: String { rawValue }
+
+        var contentMode: UIView.ContentMode {
+            switch self {
+            case .fit: return .scaleAspectFit
+            case .fill: return .scaleAspectFill
+            case .stretch: return .scaleToFill
+            }
+        }
     }
 
     private let playbackRates: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
@@ -127,6 +150,9 @@ struct PlayerHostView: View {
         .onChange(of: playMode) { _, _ in
             reloadWithCurrentSource()
         }
+        .onChange(of: scaleMode) { _, _ in
+            applyScaleMode()
+        }
     }
 
     // MARK: - 视频区域（渲染 + 手势 + 控件层）
@@ -136,6 +162,10 @@ struct PlayerHostView: View {
             KSVideoPlayer(coordinator: coordinator, url: url, options: options)
                 .id(configureToken)
                 .onAppear { installPlayer() }
+
+            // 字幕渲染层：KSVideoPlayer 底层视图不带字幕 UI，
+            // 手动渲染 subtitleModel.parts（KSPlayerLayerDelegate 每帧驱动更新）
+            subtitleOverlay
 
             // 控制层：跟随 coordinator.isMaskShow 显隐（播放中自动隐藏）
             controlsOverlay
@@ -165,6 +195,39 @@ struct PlayerHostView: View {
             // 单击：显隐控制层（播放中自动倒计时隐藏）
             coordinator.mask(show: !coordinator.isMaskShow)
         }
+        // SubtitleModel 是嵌套 ObservableObject，需手动同步到视图状态
+        .onReceive(coordinator.subtitleModel.$parts) { subtitleParts = $0 }
+        .onReceive(coordinator.subtitleModel.$selectedSubtitleInfo) { _ in
+            // 切换字幕轨后立即刷新一次
+            subtitleParts = coordinator.subtitleModel.parts
+        }
+    }
+
+    // MARK: - 字幕渲染层
+
+    private var subtitleOverlay: some View {
+        VStack(spacing: 0) {
+            Spacer()
+            ForEach(subtitleParts) { part in
+                Group {
+                    if let image = part.image {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFit()
+                    } else if let attr = part.text, attr.length > 0 {
+                        Text(AttributedString(attr))
+                            .multilineTextAlignment(.center)
+                            .foregroundStyle(.white)
+                    }
+                }
+                .shadow(color: .black.opacity(0.9), radius: 3, x: 0, y: 1)
+                .padding(.horizontal, 20)
+                // 控制栏显示时抬高避让
+                .padding(.bottom, coordinator.isMaskShow ? 88 : 18)
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .allowsHitTesting(false)
     }
 
     // MARK: - 控制层
@@ -183,9 +246,9 @@ struct PlayerHostView: View {
                 dismiss()
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 18, weight: .semibold))
+                    .font(.system(size: 20, weight: .semibold))
                     .foregroundStyle(.white)
-                    .frame(width: 36, height: 36)
+                    .frame(width: 40, height: 40)
                     .background(.black.opacity(0.35), in: Circle())
             }
             Text(item.name)
@@ -231,19 +294,19 @@ struct PlayerHostView: View {
             }
         } label: {
             Image(systemName: "ellipsis.circle")
-                .font(.system(size: 22))
+                .font(.system(size: 24))
                 .foregroundStyle(.white)
-                .frame(width: 36, height: 36)
+                .frame(width: 40, height: 40)
                 .background(.black.opacity(0.35), in: Circle())
         }
     }
 
     private var bottomBar: some View {
-        VStack(spacing: 4) {
+        VStack(spacing: 8) {
             // 进度条 + 时间
             HStack(spacing: 10) {
                 Text(timeString(Int(coordinator.timemodel.currentTime)))
-                    .font(.caption.monospacedDigit())
+                    .font(.footnote.monospacedDigit())
                     .foregroundStyle(.white)
                 Slider(
                     value: Binding(
@@ -258,13 +321,14 @@ struct PlayerHostView: View {
                     }
                 }
                 .tint(.indigo)
+                .controlSize(.large)
                 Text(timeString(coordinator.timemodel.totalTime))
-                    .font(.caption.monospacedDigit())
+                    .font(.footnote.monospacedDigit())
                     .foregroundStyle(.white)
             }
 
             // 按钮行
-            HStack(spacing: 20) {
+            HStack(spacing: 26) {
                 // 播放 / 暂停
                 Button {
                     if coordinator.state.isPlaying {
@@ -274,7 +338,7 @@ struct PlayerHostView: View {
                     }
                 } label: {
                     Image(systemName: coordinator.state.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 20))
+                        .font(.system(size: 28, weight: .medium))
                         .foregroundStyle(.white)
                 }
 
@@ -283,14 +347,14 @@ struct PlayerHostView: View {
                     coordinator.skip(interval: -15)
                 } label: {
                     Image(systemName: "gobackward.15")
-                        .font(.system(size: 18))
+                        .font(.system(size: 24))
                         .foregroundStyle(.white)
                 }
                 Button {
                     coordinator.skip(interval: 15)
                 } label: {
                     Image(systemName: "goforward.15")
-                        .font(.system(size: 18))
+                        .font(.system(size: 24))
                         .foregroundStyle(.white)
                 }
 
@@ -298,15 +362,37 @@ struct PlayerHostView: View {
 
                 audioTrackMenu
                 subtitleMenu
+                scaleModeMenu
                 playbackRateMenu
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.bottom, 10)
-        .padding(.top, 24)
+        .padding(.horizontal, 16)
+        .padding(.bottom, 12)
+        .padding(.top, 28)
         .background(
             LinearGradient(colors: [.clear, .black.opacity(0.55)], startPoint: .top, endPoint: .bottom)
         )
+    }
+
+    /// 画面比例（适应 / 填充 / 拉伸）
+    private var scaleModeMenu: some View {
+        Menu {
+            ForEach(ScaleMode.allCases) { mode in
+                Button {
+                    scaleMode = mode
+                } label: {
+                    if scaleMode == mode {
+                        Label(mode.rawValue, systemImage: "checkmark")
+                    } else {
+                        Text(mode.rawValue)
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "aspect.ratio")
+                .font(.system(size: 22))
+                .foregroundStyle(.white)
+        }
     }
 
     /// 音轨选择
@@ -327,7 +413,7 @@ struct PlayerHostView: View {
                 }
             } label: {
                 Image(systemName: "waveform")
-                    .font(.system(size: 18))
+                    .font(.system(size: 22))
                     .foregroundStyle(.white)
             }
         }
@@ -358,7 +444,7 @@ struct PlayerHostView: View {
             }
         } label: {
             Image(systemName: "captions.bubble")
-                .font(.system(size: 18))
+                .font(.system(size: 22))
                 .foregroundStyle(.white)
         }
     }
@@ -379,7 +465,7 @@ struct PlayerHostView: View {
             }
         } label: {
             Image(systemName: "speedometer")
-                .font(.system(size: 18))
+                .font(.system(size: 22))
                 .foregroundStyle(.white)
         }
     }
@@ -612,7 +698,10 @@ struct PlayerHostView: View {
                 if reporterActive { PlaybackReporter.shared.togglePause(true) }
             case .playedToTheEnd:
                 handleCurrentFinished()
-            case .initialized, .preparing, .readyToPlay, .buffering, .bufferFinished, .error:
+            case .readyToPlay, .bufferFinished:
+                // 播放器 view 就绪后应用画面比例
+                applyScaleMode()
+            case .initialized, .preparing, .buffering, .error:
                 break
             @unknown default:
                 break
@@ -626,6 +715,12 @@ struct PlayerHostView: View {
             }
         }
         startReporterIfNeeded()
+        applyScaleMode()
+    }
+
+    /// 把画面比例应用到播放器视图（切换比例、重建播放器、就绪后都会调用）
+    private func applyScaleMode() {
+        coordinator.playerLayer?.player.view?.contentMode = scaleMode.contentMode
     }
 
     // MARK: - 播放结束 / 下一集

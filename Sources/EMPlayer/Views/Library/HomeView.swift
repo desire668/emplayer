@@ -278,28 +278,26 @@ struct ResumeCard: View {
     
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            ZStack(alignment: .bottom) {
-                KFPosterImage(url: EmbyClient.shared.thumbImageURL(for: item, maxWidth: 800), size: size, placeholder: .backdrop, contentMode: .fill)
-                    .clipped()
-                VStack(spacing: 6) {
-                    HStack {
-                        Spacer()
-                        Image(systemName: "play.fill")
-                            .font(.title3.weight(.semibold))
-                            .padding(10)
-                            .background(.ultraThinMaterial, in: Circle())
-                        Spacer()
-                    }
+            KFPosterImage(url: EmbyClient.shared.thumbImageURL(for: item, maxWidth: 800), size: size, placeholder: .backdrop, contentMode: .fill)
+                .clipped()
+                // 播放按钮居中显示
+                .overlay {
+                    Image(systemName: "play.fill")
+                        .font(.title2.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(14)
+                        .background(.ultraThinMaterial, in: Circle())
+                }
+                .overlay(alignment: .bottom) {
                     if let pct = item.userData?.playedPercentage, pct > 0 {
                         ProgressView(value: min(1, pct / 100.0))
                             .progressViewStyle(.linear)
                             .tint(.indigo)
+                            .padding(8)
                     }
                 }
-                .padding(10)
-            }
-            .frame(width: size.width, height: size.height)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .frame(width: size.width, height: size.height)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             
             Text(MediaTypeUtils.displayTitle(item))
                 .font(.callout.weight(.semibold))

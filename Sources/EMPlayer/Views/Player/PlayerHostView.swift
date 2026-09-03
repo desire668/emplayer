@@ -746,8 +746,7 @@ struct PlayerHostView: View {
                 PlaybackReporter.shared.updatePosition(current, isPaused: false)
             }
         }
-        coordinator.onStateChanged = { [weak self] _, state in
-            guard let self else { return }
+        coordinator.onStateChanged = { _, state in
             switch state {
             case .paused:
                 if reporterActive { PlaybackReporter.shared.togglePause(true) }

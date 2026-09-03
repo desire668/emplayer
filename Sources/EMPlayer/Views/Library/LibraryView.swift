@@ -51,7 +51,7 @@ struct LibraryView: View {
 
 struct LibraryFolderCard: View {
     let folder: MediaFolder
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             ZStack {
@@ -69,21 +69,15 @@ struct LibraryFolderCard: View {
                 }
             }
             .frame(height: 110)
-            
-            VStack(alignment: .leading, spacing: 3) {
-                Text(folder.collectionName)
-                    .font(.headline)
-                    .lineLimit(1)
-                Text(folder.name)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
+
+            Text(folder.collectionName)
+                .font(.headline)
+                .lineLimit(1)
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(.quaternary.opacity(0.4)))
     }
-    
+
     private var folderImage: URL? {
         guard let tags = folder.imageTags else { return nil }
         return EmbyClient.shared.imageURL(itemId: folder.id, tag: tags.primary ?? tags.thumb, type: "Primary", maxWidth: 400)
@@ -297,18 +291,23 @@ struct LibraryFolderView: View {
         loading = true
         errorMsg = nil
         do {
+            // 剧集库默认只显示 Series 级别（不展开到每集），其他库过滤掉 Episode 类型
+            let colType = folder.collectionType?.lowercased() ?? ""
+            let includeTypes: [String]? = colType == "tvshows" ? ["Series"] : nil
             let result = try await EmbyClient.shared.getItems(
                 parentId: folder.id,
                 filters: filter.filters.isEmpty ? nil : filter.filters,
                 sortBy: sortBy.param,
                 sortOrder: sortOrder.param,
                 recursive: !isFolderOnly,
+                includeItemTypes: includeTypes,
                 searchTerm: searchText.isEmpty ? nil : searchText,
                 limit: 500,
                 isFavorite: filter.isFavorite,
                 hasPlayed: filter.hasPlayed
             )
-            items = result.items
+            // 双重保险：客户端再过滤掉 Episode 类型（部分服务器不遵 IncludeItemTypes）
+            items = result.items.filter { ($0.type ?? "").caseInsensitiveCompare("Episode") != .orderedSame }
             total = result.totalRecordCount
         } catch {
             errorMsg = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription

@@ -30,37 +30,12 @@ struct MainTabView: View {
     }
 }
 
-// MARK: - Home (Continue Watching + Favorites + Server Views Categories)
-
-/// 首页媒体库区块排序方式
-enum HomeSortOption: String, CaseIterable, Identifiable {
-    case dateAdded = "最近添加"
-    case name = "名称"
-    case year = "上映年份"
-    var id: String { rawValue }
-
-    var sortBy: String {
-        switch self {
-        case .dateAdded: return "DateCreated"
-        case .name: return "SortName"
-        case .year: return "ProductionYear"
-        }
-    }
-    var sortOrder: String {
-        switch self {
-        case .name: return "Ascending"
-        default: return "Descending"
-        }
-    }
-}
+// MARK: - Home (Continue Watching + Favorites)
 
 struct HomeView: View {
     @EnvironmentObject var appState: AppState
     @State private var resume: [MediaItem] = []
     @State private var favorites: [MediaItem] = []
-    @State private var sections: [(folder: MediaFolder, items: [MediaItem])] = []
-    // 每个媒体库区块的排序（folderId -> 排序方式），默认最近添加
-    @State private var sortOptions: [String: HomeSortOption] = [:]
     @State private var loading: Bool = true
     @State private var loadTask: Task<Void, Never>?
 
@@ -89,29 +64,6 @@ struct HomeView: View {
                                 EmptyHint(label: "暂无收藏内容", systemImage: "heart")
                             }
                         } header: { SectionHeader(title: "收藏", systemImage: "heart.fill") }
-
-                        // 各服务器媒体库分类（名称取自服务器，可切换排序）
-                        ForEach(Array(sections.enumerated()), id: \.offset) { idx, section in
-                            Section {
-                                PosterRow(items: section.items) { item in
-                                    PosterCard(item: item)
-                                } emptyView: {
-                                    EmptyHint(label: "暂无内容", systemImage: "film.stack")
-                                }
-                            } header: {
-                                SectionHeader(
-                                    title: section.folder.collectionName,
-                                    systemImage: section.folder.sfSymbol,
-                                    sortBinding: Binding(
-                                        get: { sortOptions[section.folder.id] ?? .dateAdded },
-                                        set: { sortOptions[section.folder.id] = $0 }
-                                    ),
-                                    onSortChange: { sort in
-                                        Task { await reloadFolder(section.folder, sort: sort) }
-                                    }
-                                )
-                            }
-                        }
                     }
                     .padding(.bottom, 20)
                 }
@@ -119,7 +71,7 @@ struct HomeView: View {
             .navigationTitle("首页")
             .refreshable { await load() }
             .onAppear {
-                if !loading && resume.isEmpty && sections.isEmpty {
+                if !loading && resume.isEmpty && favorites.isEmpty {
                     Task { await load() }
                 }
             }
@@ -132,7 +84,7 @@ struct HomeView: View {
         loading = true
         let task = Task {
             do {
-                // 1. 加载继续观看 + 收藏（独立容错）
+                // 加载继续观看 + 收藏（独立容错）
                 async let r1: QueryResult<MediaItem>? = loadSection {
                     try await EmbyClient.shared.getResumeItems(limit: 20)
                 }
@@ -146,51 +98,12 @@ struct HomeView: View {
                     )
                 }
 
-                // 2. 加载服务器 Views（媒体库分类）
-                let folders: [MediaFolder]
-                do {
-                    folders = try await EmbyClient.shared.getMediaFolders()
-                } catch {
-                    if Task.isCancelled { return }
-                    folders = []
-                    await MainActor.run {
-                        appState.handleError(error, fallback: "加载媒体库分类失败")
-                    }
-                }
-
-                // 3. 并发加载每个 View 的最新内容（按各自排序）
-                let folderResults = await withTaskGroup(of: (folder: MediaFolder, items: [MediaItem]).self) { group in
-                    for folder in folders {
-                        group.addTask { [folder] in
-                            do {
-                                let sort = await MainActor.run { sortOptions[folder.id] ?? .dateAdded }
-                                let result = try await EmbyClient.shared.getItems(
-                                    parentId: folder.id,
-                                    sortBy: [sort.sortBy],
-                                    sortOrder: sort.sortOrder,
-                                    recursive: true,
-                                    limit: 20
-                                )
-                                return (folder: folder, items: result.items)
-                            } catch {
-                                return (folder: folder, items: [])
-                            }
-                        }
-                    }
-                    var results: [(folder: MediaFolder, items: [MediaItem])] = []
-                    for await (folder, items) in group {
-                        results.append((folder: folder, items: items))
-                    }
-                    return results
-                }
-
                 try Task.checkCancellation()
                 let resumeResult = await r1
                 let favResult = await r2
                 await MainActor.run {
                     resume = resumeResult?.items ?? []
                     favorites = favResult?.items ?? []
-                    sections = folderResults.filter { !$0.items.isEmpty }
                     loading = false
                 }
             } catch is CancellationError {
@@ -203,27 +116,6 @@ struct HomeView: View {
             }
         }
         loadTask = task
-    }
-
-    /// 排序切换后单库刷新（只更新该区块，不整页 reload）
-    private func reloadFolder(_ folder: MediaFolder, sort: HomeSortOption) async {
-        guard let idx = sections.firstIndex(where: { $0.folder.id == folder.id }) else { return }
-        let result = await loadSection {
-            try await EmbyClient.shared.getItems(
-                parentId: folder.id,
-                sortBy: [sort.sortBy],
-                sortOrder: sort.sortOrder,
-                recursive: true,
-                limit: 20
-            )
-        }
-        if let r = result, !Task.isCancelled {
-            await MainActor.run {
-                if sections.indices.contains(idx) {
-                    sections[idx] = (folder: folder, items: r.items)
-                }
-            }
-        }
     }
 
     /// 单个首页区块的容错加载：失败时弹出错误横幅并返回 nil（区块显示空态），不影响其他区块
@@ -244,38 +136,12 @@ struct SectionHeader: View {
     let title: String
     let systemImage: String
     var action: (() -> Void)? = nil
-    var sortBinding: Binding<HomeSortOption>? = nil
-    var onSortChange: ((HomeSortOption) -> Void)? = nil
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
             Label(title, systemImage: systemImage)
                 .font(.title3.bold())
             Spacer()
-            if let sb = sortBinding {
-                Menu {
-                    ForEach(HomeSortOption.allCases) { opt in
-                        Button {
-                            guard sb.wrappedValue != opt else { return }
-                            sb.wrappedValue = opt
-                            onSortChange?(opt)
-                        } label: {
-                            if sb.wrappedValue == opt {
-                                Label(opt.rawValue, systemImage: "checkmark")
-                            } else {
-                                Text(opt.rawValue)
-                            }
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.up.arrow.down")
-                        Text(sb.wrappedValue.rawValue)
-                    }
-                    .font(.footnote)
-                    .foregroundStyle(.indigo)
-                }
-            }
             if let a = action {
                 Button("查看全部", action: a)
                     .font(.footnote)
@@ -381,7 +247,7 @@ struct ResumeCard: View {
     
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            KFPosterImage(url: EmbyClient.shared.thumbImageURL(for: item, maxWidth: 800), size: size, placeholder: .backdrop, contentMode: .fill)
+            KFPosterImage(url: resumeImageURL, size: size, placeholder: .backdrop, contentMode: .fill)
                 .clipped()
                 // 播放按钮居中显示
                 .overlay {
@@ -401,7 +267,7 @@ struct ResumeCard: View {
                 }
                 .frame(width: size.width, height: size.height)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            
+
             Text(MediaTypeUtils.displayTitle(item))
                 .font(.callout.weight(.semibold))
                 .lineLimit(1)
@@ -411,6 +277,15 @@ struct ResumeCard: View {
                 .lineLimit(1)
         }
         .frame(width: size.width)
+    }
+
+    /// 继续观看封面：集类型用剧集封面（seriesId 的 Backdrop），而非具体某集的缩略图
+    private var resumeImageURL: URL? {
+        let isEpisode = (item.type ?? "").caseInsensitiveCompare("Episode") == .orderedSame
+        if isEpisode, let sid = item.seriesId, !sid.isEmpty {
+            return EmbyClient.shared.imageURL(itemId: sid, tag: nil, type: "Backdrop", maxWidth: 800)
+        }
+        return EmbyClient.shared.thumbImageURL(for: item, maxWidth: 800)
     }
 }
 

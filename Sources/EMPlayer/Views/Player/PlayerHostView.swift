@@ -311,7 +311,7 @@ struct PlayerHostView: View {
         VStack(spacing: 0) {
             topBar(isLandscape: isLandscape)
             Spacer()
-            bottomBar
+            bottomBar(isLandscape: isLandscape)
         }
     }
 
@@ -321,24 +321,10 @@ struct PlayerHostView: View {
                 dismiss()
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 40, height: 40)
-                    .background(.black.opacity(0.35), in: Circle())
-            }
-            Button {
-                // 播放页内横竖屏切换
-                if isLandscape {
-                    OrientationManager.shared.rotateToPortrait()
-                } else {
-                    OrientationManager.shared.rotateToLandscape()
-                }
-            } label: {
-                Image(systemName: isLandscape ? "rectangle.portrait.rotate" : "rectangle.landscape.rotate")
-                    .font(.system(size: 20))
-                    .foregroundStyle(.white)
-                    .frame(width: 40, height: 40)
-                    .background(.black.opacity(0.35), in: Circle())
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 40, height: 40)
+                        .background(.black.opacity(0.35), in: Circle())
             }
             Text(item.name)
                 .font(.headline)
@@ -390,7 +376,7 @@ struct PlayerHostView: View {
         }
     }
 
-    private var bottomBar: some View {
+    private func bottomBar(isLandscape: Bool) -> some View {
         VStack(spacing: 8) {
             // 进度条 + 时间
             HStack(spacing: 10) {
@@ -463,6 +449,19 @@ struct PlayerHostView: View {
                 subtitleMenu
                 scaleModeMenu
                 playbackRateMenu
+
+                // 横竖屏切换（右下角）
+                Button {
+                    if isLandscape {
+                        OrientationManager.shared.rotateToPortrait()
+                    } else {
+                        OrientationManager.shared.rotateToLandscape()
+                    }
+                } label: {
+                    Image(systemName: isLandscape ? "rectangle.portrait.rotate" : "rectangle.landscape.rotate")
+                        .font(.system(size: 22))
+                        .foregroundStyle(.white)
+                }
             }
         }
         .padding(.horizontal, 16)

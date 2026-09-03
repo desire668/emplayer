@@ -67,8 +67,14 @@ struct PlayerHostView: View {
     // 播放锁定（锁定后仅解锁按钮可点，防误触）
     @State private var isLocked: Bool = false
 
-    // 横竖屏布局跟踪（控制状态栏显隐）
+    // 横竖屏布局跟踪（控制状态栏显隐，来源于 GeometryReader 的真实窗口方向）
     @State private var isLandscapeLayout: Bool = true
+
+    // 控制层显隐（自管自动隐藏：播放中 4s 无操作隐藏；暂停/拖动/弹菜单时常驻）
+    @State private var controlsVisible: Bool = true
+    @State private var hideTask: Task<Void, Never>?
+    // 音量弹窗
+    @State private var showVolumePopover: Bool = false
 
     // 缓冲进度提示
     @State private var isBuffering: Bool = false
@@ -118,8 +124,9 @@ struct PlayerHostView: View {
 
     var body: some View {
         GeometryReader { geo in
+            // 真实窗口方向（按钮图标/布局以此为准，与设备旋转实时同步）
             let isLandscape = geo.size.width > geo.size.height
-            let topInset = isLandscape ? 0 : geo.safeAreaInsets.top + 14
+            let insets = geo.safeAreaInsets
 
             ZStack(alignment: .top) {
                 Color.black.ignoresSafeArea()
@@ -127,92 +134,35 @@ struct PlayerHostView: View {
                 if isLoading {
                     loadingView
                 } else if let url = playbackURL {
-                    // 视频渲染层（纯渲染，不含控制层）
                     if isLandscape {
-                        KSVideoPlayer(coordinator: coordinator, url: url, options: options)
-                            .id(configureToken)
-                            .onAppear { installPlayer() }
+                        // 横屏（全屏）：视频铺满整个窗口
+                        videoArea(url: url, isLandscape: isLandscape, insets: insets)
                             .frame(width: geo.size.width, height: geo.size.height)
                     } else {
-                        // 竖屏：画面在顶部 16:9，下方空出放控件
-                        VStack(spacing: 0) {
-                            KSVideoPlayer(coordinator: coordinator, url: url, options: options)
-                                .id(configureToken)
-                                .onAppear { installPlayer() }
-                                .frame(width: geo.size.width, height: geo.size.width * 9.0 / 16.0)
-                                .clipped()
-                            Spacer()
-                        }
-                        .frame(width: geo.size.width, height: geo.size.height - topInset)
-                        .padding(.top, topInset)
-                    }
-                    subtitleOverlay
-
-                    // 缓冲提示：**全屏居中**（而非视频区内居中）
-                    if isBuffering {
-                        bufferingView
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        // 竖屏（窗口化）：画面 16:9 在整屏垂直居中，上下留黑
+                        videoArea(url: url, isLandscape: isLandscape, insets: insets)
+                            .frame(width: geo.size.width, height: geo.size.width * 9.0 / 16.0)
+                            .clipShape(Rectangle())
+                            .frame(maxHeight: .infinity)
                     }
                 } else {
                     fatalView
                 }
-
-                // 横幅错误提示（独立层）
-                if let bannerMsg {
-                    Text(bannerMsg)
-                        .font(.caption)
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(.red.opacity(0.85), in: Capsule())
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                        .padding(.top, 52)
-                }
-
-                // 控制层（覆盖整个屏幕；锁定时只显示解锁按钮）
-                if isLocked {
-                    unlockOverlay
-                        .opacity(coordinator.isMaskShow ? 1 : 0)
-                        .allowsHitTesting(coordinator.isMaskShow)
-                } else {
-                    controlsOverlay(isLandscape: isLandscape, geo: geo)
-                        .opacity(coordinator.isMaskShow ? 1 : 0)
-                }
-            }
-            .contentShape(Rectangle())
-            .onTapGesture(count: 2) {
-                guard !isLocked else { return }
-                if coordinator.state.isPlaying {
-                    coordinator.playerLayer?.pause()
-                } else {
-                    coordinator.playerLayer?.play()
-                }
-            }
-            .onTapGesture {
-                coordinator.mask(show: !coordinator.isMaskShow)
-            }
-            .onReceive(bufferPollPublisher) { _ in
-                guard isBuffering else { return }
-                let total = Double(coordinator.timemodel.totalTime)
-                let playable = coordinator.playerLayer?.player.playableTime ?? 0
-                if total > 0 {
-                    bufferPercent = min(1, max(0, playable / total))
-                }
-            }
-            .onReceive(coordinator.subtitleModel.$parts) { subtitleParts = $0 }
-            .onReceive(coordinator.subtitleModel.$selectedSubtitleInfo) { _ in
-                subtitleParts = coordinator.subtitleModel.parts
             }
             .onChange(of: isLandscape) { _, v in isLandscapeLayout = v }
             .onAppear { isLandscapeLayout = isLandscape }
         }
         .preferredColorScheme(.dark)
-        .statusBarHidden(!isLandscapeLayout)
+        // 横屏全屏隐藏状态栏；竖屏保留
+        .statusBarHidden(isLandscapeLayout)
         .background(Color.black.ignoresSafeArea())
         .task(id: item.id, priority: .high) { await resolvePlayback() }
-        .onAppear { OrientationManager.shared.lockLandscape() }
+        .onAppear {
+            OrientationManager.shared.enterPlayer()
+        }
         .onDisappear {
-            OrientationManager.shared.lockPortrait()
+            hideTask?.cancel()
+            OrientationManager.shared.exitPlayer()
             teardownReporter(playedToCompletion: guessPlayedToCompletion())
         }
         .onChange(of: currentIndex) { _, idx in
@@ -220,14 +170,80 @@ struct PlayerHostView: View {
             let next = playlist[idx]
             item = next
             startTicks = next.playbackPositionTicks
+            // item.id 变化会自动触发上面的 .task(id: item.id) 重新解析播放
         }
-        .onChange(of: playMode) { _, _ in reloadWithCurrentSource() }
-        .onChange(of: scaleMode) { _, _ in applyScaleMode() }
+        .onChange(of: playMode) { _, _ in
+            reloadWithCurrentSource()
+        }
+        .onChange(of: scaleMode) { _, _ in
+            applyScaleMode()
+        }
     }
 
-    // MARK: - 缓冲轮询（0.5s 一次）
+    // MARK: - 视频区域（渲染 + 手势 + 控件层）
 
+    /// 缓冲进度轮询（0.5s 一次，仅缓冲中读取 playableTime）
     private let bufferPollPublisher = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
+
+    private func videoArea(url: URL, isLandscape: Bool, insets: EdgeInsets) -> some View {
+        ZStack {
+            KSVideoPlayer(coordinator: coordinator, url: url, options: options)
+                .id(configureToken)
+                .onAppear { installPlayer() }
+
+            // 字幕渲染层：KSVideoPlayer 底层视图不带字幕 UI，
+            // 手动渲染 subtitleModel.parts（KSPlayerLayerDelegate 每帧驱动更新）
+            subtitleOverlay
+
+            // 缓冲进度提示（加载 / 卡顿时显示）
+            if isBuffering {
+                bufferingView
+            }
+
+            // 控制层：自动隐藏 + 横竖屏自适应 + 安全区域避让
+            controlsLayer(isLandscape: isLandscape, insets: insets)
+
+            if let bannerMsg {
+                Text(bannerMsg)
+                    .font(.caption)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(.red.opacity(0.85), in: Capsule())
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, isLandscape ? insets.top + 56 : 44)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) {
+            // 双击：播放 / 暂停（锁定时忽略）
+            guard !isLocked else { return }
+            togglePlayPause()
+        }
+        .onTapGesture {
+            // 单击：显隐控制层（播放中自动倒计时隐藏；锁定时用于唤出解锁按钮）
+            if controlsVisible { hideControls() } else { showControls() }
+        }
+        // 缓冲进度轮询：可播放时长 / 总时长
+        .onReceive(bufferPollPublisher) { _ in
+            guard isBuffering else { return }
+            let total = Double(coordinator.timemodel.totalTime)
+            let playable = coordinator.playerLayer?.player.playableTime ?? 0
+            if total > 0 {
+                bufferPercent = min(1, max(0, playable / total))
+            }
+        }
+        // SubtitleModel 是嵌套 ObservableObject，需手动同步到视图状态
+        .onReceive(coordinator.subtitleModel.$parts) { subtitleParts = $0 }
+        .onReceive(coordinator.subtitleModel.$selectedSubtitleInfo) { _ in
+            // 切换字幕轨后立即刷新一次
+            subtitleParts = coordinator.subtitleModel.parts
+        }
+        // 音量弹窗打开时常驻控制层，关闭后重新计时自动隐藏
+        .onChange(of: showVolumePopover) { _, shown in
+            if shown { keepControlsVisible() } else { scheduleAutoHide() }
+        }
+    }
 
     // MARK: - 字幕渲染层
 
@@ -248,8 +264,8 @@ struct PlayerHostView: View {
                 }
                 .shadow(color: .black.opacity(0.9), radius: 3, x: 0, y: 1)
                 .padding(.horizontal, 20)
-                // 控制栏显示时抬高避让；双语字幕行间距要窄，不用额外 padding
-                .padding(.bottom, coordinator.isMaskShow ? 88 : 6)
+                // 控制栏显示时抬高避让；双语字幕行间距保持紧凑
+                .padding(.bottom, controlsVisible ? 96 : 8)
                 .frame(maxWidth: .infinity)
             }
         }
@@ -271,317 +287,363 @@ struct PlayerHostView: View {
         .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
-    // MARK: - 控制层（重构：浮动关闭 + 右侧锁定 + 单胶囊底栏）
+    // MARK: - 控制层（自动隐藏 / 横竖屏自适应 / 安全区域避让）
 
-    private func controlsOverlay(isLandscape: Bool, geo: GeometryProxy) -> some View {
-        ZStack(alignment: .topTrailing) {
-            // 顶：浮动关闭 X
-            VStack {
-                HStack {
-                    Button {
-                        dismiss()
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 18, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .frame(width: 36, height: 36)
-                            .background(.ultraThinMaterial, in: Capsule())
-                    }
-                    Spacer()
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, isLandscape ? 10 : 0)
-                Spacer()
-                bottomBar(isLandscape: isLandscape)
-            }
-            .frame(width: geo.size.width, height: geo.size.height)
+    /// 横屏时避让刘海/灵动岛与 Home Indicator；竖屏视频本身不贴屏幕边，用固定边距
+    private func hPad(_ insets: EdgeInsets, isLandscape: Bool) -> CGFloat {
+        isLandscape ? max(12, insets.leading, insets.trailing) : 10
+    }
 
-            // 锁定按钮：**屏幕右侧垂直居中**（而非视频区右侧）
-            if !isLocked {
+    private func controlsLayer(isLandscape: Bool, insets: EdgeInsets) -> some View {
+        Group {
+            if isLocked {
+                // 锁定态：仅保留右上角解锁按钮（单击屏幕唤出）
                 VStack {
-                    Spacer()
-                    Button {
-                        isLocked = true
-                        coordinator.mask(show: true)
-                    } label: {
-                        Image(systemName: "lock.open.fill")
-                            .font(.system(size: 18))
-                            .foregroundStyle(.white)
+                    HStack {
+                        Spacer()
+                        unlockButton
+                            .padding(.top, isLandscape ? insets.top + 6 : 8)
+                            .padding(.trailing, hPad(insets, isLandscape: isLandscape))
                     }
-                    .frame(width: 40, height: 40)
-                    .background(.ultraThinMaterial, in: Capsule())
                     Spacer()
                 }
-                .frame(width: geo.size.width, height: geo.size.height, alignment: .trailing)
-                .padding(.trailing, 8)
-            }
-        }
-    }
-
-    /// 锁定态覆盖层（隐藏原控制层，仅解锁按钮）
-    private var unlockOverlay: some View {
-        VStack {
-            HStack {
-                Spacer()
-                Button {
-                    isLocked = false
-                } label: {
-                    Image(systemName: "lock.fill")
-                        .font(.system(size: 20))
-                        .foregroundStyle(.white)
-                        .frame(width: 40, height: 40)
-                        .background(.black.opacity(0.55), in: Circle())
+            } else {
+                VStack(spacing: 0) {
+                    topBar(isLandscape: isLandscape, insets: insets)
+                    Spacer(minLength: 0)
+                    bottomBar(isLandscape: isLandscape, insets: insets)
                 }
-                .padding(.horizontal, 14)
-                .padding(.top, 10)
             }
-            Spacer()
         }
+        .opacity(controlsVisible ? 1 : 0)
+        .allowsHitTesting(controlsVisible)
+        .animation(.easeInOut(duration: 0.25), value: controlsVisible)
     }
 
-    // MARK: - 单胶囊底栏：时间+控制+进度+菜单 一行排列；所有按钮统一 36x36
-
-    private func bottomBar(isLandscape: Bool) -> some View {
-        HStack(spacing: 10) {
-            Text(timeString(Int(coordinator.timemodel.currentTime)))
-                .font(.caption.monospacedDigit())
+    /// 解锁按钮（锁定态唯一可见控件）
+    private var unlockButton: some View {
+        Button {
+            isLocked = false
+            showControls()
+        } label: {
+            Image(systemName: "lock.fill")
+                .font(.system(size: 20, weight: .semibold))
                 .foregroundStyle(.white)
-                .frame(width: 34, alignment: .leading)
-
-            // 快退 / 播放暂停 / 快进
-            HStack(spacing: 10) {
-                Button {
-                    coordinator.skip(interval: -15)
-                } label: {
-                    Image(systemName: "gobackward.15")
-                        .font(.system(size: 16))
-                        .foregroundStyle(.white)
-                }
-                .frame(width: 36, height: 36)
-
-                Button {
-                    if coordinator.state.isPlaying {
-                        coordinator.playerLayer?.pause()
-                    } else {
-                        coordinator.playerLayer?.play()
-                    }
-                } label: {
-                    Image(systemName: coordinator.state.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 22, weight: .medium))
-                        .foregroundStyle(.white)
-                }
-                .frame(width: 36, height: 36)
-
-                Button {
-                    coordinator.skip(interval: 15)
-                } label: {
-                    Image(systemName: "goforward.15")
-                        .font(.system(size: 16))
-                        .foregroundStyle(.white)
-                }
-                .frame(width: 36, height: 36)
-            }
-
-            // 进度条：自定义 Track（无 thumb），支持点击 + 拖拽 seek
-            SeekProgressTrack(
-                current: isSeeking ? seekValue : Double(coordinator.timemodel.currentTime),
-                total: max(1, Double(coordinator.timemodel.totalTime)),
-                onSeek: { value, finishing in
-                    seekValue = value
-                    isSeeking = true
-                    if finishing {
-                        coordinator.seek(time: value)
-                        isSeeking = false
-                    }
-                }
-            )
-            .frame(height: 22)
-
-            Text(timeString(coordinator.timemodel.totalTime))
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.white)
-                .frame(width: 34, alignment: .trailing)
-
-            // 右侧功能按钮（每个统一 36x36，HStack spacing: 10）
-            HStack(spacing: 10) {
-                scaleModeMenu
-                audioTrackMenu
-                subtitleMenu
-                playbackRateMenu
-                Button {
-                    if isLandscape {
-                        OrientationManager.shared.rotateToPortrait()
-                    } else {
-                        OrientationManager.shared.rotateToLandscape()
-                    }
-                } label: {
-                    Image(systemName: isLandscape ? "rectangle.portrait.rotate" : "rectangle.landscape.rotate")
-                        .font(.system(size: 16))
-                        .foregroundStyle(.white)
-                }
-                .frame(width: 36, height: 36)
-            }
+                .frame(width: 44, height: 44)
+                .background(.ultraThinMaterial, in: Circle())
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(.ultraThinMaterial, in: Capsule())
-        .padding(.horizontal, 16)
-        .padding(.bottom, isLandscape ? 18 : 12)
+        .buttonStyle(.plain)
     }
 
-    /// 画面比例（适应 / 填充 / 拉伸）
-    private var scaleModeMenu: some View {
+    /// 顶栏：返回 + 标题 + 锁定（渐变背景；横屏避让灵动岛/刘海）
+    private func topBar(isLandscape: Bool, insets: EdgeInsets) -> some View {
+        HStack(spacing: 2) {
+            playerButton("chevron.down", size: 20) { dismiss() }
+
+            Text(MediaTypeUtils.displayTitle(item))
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .padding(.leading, 6)
+
+            Spacer(minLength: 8)
+
+            // 播放锁定（防误触）：锁定后仅可解锁
+            playerButton(isLocked ? "lock.fill" : "lock.open.fill",
+                         size: 18, active: isLocked) {
+                isLocked.toggle()
+                if isLocked { keepControlsVisible() } else { showControls() }
+            }
+        }
+        .padding(.horizontal, hPad(insets, isLandscape: isLandscape))
+        .padding(.top, isLandscape ? insets.top + 2 : 4)
+        .padding(.bottom, 20)
+        .background(
+            LinearGradient(colors: [.black.opacity(0.55), .clear],
+                           startPoint: .top, endPoint: .bottom)
+        )
+    }
+
+    // MARK: - 底栏（上：进度行；下：按钮行；渐变背景 + 安全区域）
+
+    private func bottomBar(isLandscape: Bool, insets: EdgeInsets) -> some View {
+        VStack(spacing: 2) {
+            // 进度行：当前时间 —— 进度条 —— 总时长
+            HStack(spacing: 10) {
+                Text(timeString(coordinator.timemodel.currentTime))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.9))
+                    .frame(width: 42, alignment: .leading)
+
+                progressSlider
+
+                Text(timeString(coordinator.timemodel.totalTime))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.9))
+                    .frame(width: 42, alignment: .trailing)
+            }
+
+            // 按钮行：左侧播放控制组，右侧功能组（竖屏自动收窄，次要功能进「更多」）
+            HStack(spacing: 2) {
+                playerButton("gobackward.15", size: 22) { coordinator.skip(interval: -15) }
+                playPauseButton
+                playerButton("goforward.15", size: 22) { coordinator.skip(interval: 15) }
+
+                Spacer(minLength: 8)
+
+                // 音量（仅横屏显示；竖屏用机身音量键）
+                if isLandscape {
+                    volumeButton
+                }
+                // 更多：选集 / 倍速 / 字幕 / 音轨 / 画面比例 / 播放模式
+                moreMenu
+                // 横竖屏切换（= 全屏进入 / 退出）
+                orientationButton(isLandscape: isLandscape)
+            }
+        }
+        .padding(.horizontal, hPad(insets, isLandscape: isLandscape))
+        .padding(.top, 18)
+        .padding(.bottom, isLandscape ? insets.bottom + 6 : 6)
+        .background(
+            LinearGradient(colors: [.clear, .black.opacity(0.6)],
+                           startPoint: .top, endPoint: .bottom)
+        )
+    }
+
+    // MARK: - 控制按钮（统一 44×44 点击区域）
+
+    /// 通用控制按钮：图标 20~24pt，点击区域 44×44pt，操作后重置自动隐藏计时
+    private func playerButton(_ systemName: String,
+                              size: CGFloat = 22,
+                              active: Bool = false,
+                              action: @escaping () -> Void) -> some View {
+        Button {
+            action()
+            scheduleAutoHide()
+        } label: {
+            Image(systemName: systemName)
+                .font(.system(size: size, weight: .semibold))
+                .foregroundStyle(active ? Color.indigo : Color.white)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// 播放 / 暂停（状态联动图标；暂停时常驻控制层，播放后自动隐藏）
+    private var playPauseButton: some View {
+        Button {
+            togglePlayPause()
+        } label: {
+            Image(systemName: coordinator.state.isPlaying ? "pause.fill" : "play.fill")
+                .font(.system(size: 28, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 52, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// 进度条：拖动中常驻控制层，松手定位后重新计时
+    private var progressSlider: some View {
+        Slider(
+            value: Binding(
+                get: { isSeeking ? seekValue : Double(coordinator.timemodel.currentTime) },
+                set: { seekValue = $0 }
+            ),
+            in: 0...max(1, Double(coordinator.timemodel.totalTime))
+        ) { editing in
+            isSeeking = editing
+            if editing {
+                keepControlsVisible()
+            } else {
+                coordinator.seek(time: seekValue)
+                scheduleAutoHide()
+            }
+        }
+        .tint(.indigo)
+    }
+
+    /// 音量按钮（MPVolumeView 系统音量滑块，iOS 原生公开 API）
+    private var volumeButton: some View {
+        Button {
+            showVolumePopover.toggle()
+        } label: {
+            Image(systemName: "speaker.wave.2.fill")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $showVolumePopover) {
+            VStack(spacing: 10) {
+                Label("音量", systemImage: "speaker.wave.2.fill")
+                    .font(.footnote.weight(.medium))
+                SystemVolumeView()
+                    .frame(width: 210, height: 32)
+            }
+            .padding(18)
+            .presentationCompactAdaptation(.popover)
+        }
+    }
+
+    /// 横竖屏切换按钮：图标跟随 GeometryReader 的真实窗口方向
+    private func orientationButton(isLandscape: Bool) -> some View {
+        Button {
+            if isLandscape {
+                OrientationManager.shared.requestPortrait()
+            } else {
+                OrientationManager.shared.requestLandscape()
+            }
+            scheduleAutoHide()
+        } label: {
+            Image(systemName: isLandscape ? "rectangle.portrait.rotate" : "rectangle.landscape.rotate")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// 「更多」菜单：选集 / 倍速 / 字幕 / 音轨 / 画面比例 / 播放模式（Picker 自带勾选状态）
+    private var moreMenu: some View {
         Menu {
-            ForEach(ScaleMode.allCases) { mode in
-                Button {
-                    scaleMode = mode
-                } label: {
-                    if scaleMode == mode {
-                        Label(mode.rawValue, systemImage: "checkmark")
-                    } else {
-                        Text(mode.rawValue)
+            if playlist.count > 1 {
+                Picker("选集", selection: $currentIndex) {
+                    ForEach(Array(playlist.enumerated()), id: \.offset) { idx, ep in
+                        Text(episodeLabel(ep, idx: idx)).tag(idx)
                     }
+                }
+            }
+
+            Picker("倍速",
+                   selection: Binding<Float>(
+                       get: { coordinator.playbackRate },
+                       set: { coordinator.playbackRate = $0 })) {
+                ForEach(playbackRates, id: \.self) { rate in
+                    Text(rateLabel(rate)).tag(rate)
+                }
+            }
+
+            Picker("字幕", selection: subtitleSelection) {
+                Text("关闭字幕").tag(-1)
+                ForEach(Array(coordinator.subtitleModel.subtitleInfos.enumerated()), id: \.element.id) { idx, info in
+                    Text(info.name).tag(idx)
+                }
+            }
+
+            if let tracks = coordinator.playerLayer?.player.tracks(mediaType: .audio), !tracks.isEmpty {
+                Picker("音轨",
+                       selection: Binding<Int>(
+                           get: { tracks.firstIndex(where: { $0.isEnabled }) ?? 0 },
+                           set: { idx in
+                               if idx >= 0, idx < tracks.count {
+                                   coordinator.playerLayer?.player.select(track: tracks[idx])
+                               }
+                           })) {
+                    ForEach(Array(tracks.enumerated()), id: \.element.trackID) { idx, track in
+                        Text(track.name).tag(idx)
+                    }
+                }
+            }
+
+            Picker("画面比例", selection: $scaleMode) {
+                ForEach(ScaleMode.allCases) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+
+            Picker("播放模式", selection: $playMode) {
+                ForEach(PlayMode.allCases) { mode in
+                    Text(mode.rawValue).tag(mode)
                 }
             }
         } label: {
-            Image(systemName: "aspect.ratio")
-                .font(.system(size: 16))
+            Image(systemName: "ellipsis.circle")
+                .font(.system(size: 20, weight: .semibold))
                 .foregroundStyle(.white)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
         }
-        .frame(width: 36, height: 36)
+        .buttonStyle(.plain)
+        // 打开菜单时常驻控制层（菜单打开期间不自动隐藏）
+        .simultaneousGesture(TapGesture().onEnded { keepControlsVisible() })
     }
 
-    /// 音轨选择：始终渲染按钮；菜单项在 readyToPlay 后自动出现（playerLayer 由 @StateObject 驱动重绘）
-    private var audioTrackMenu: some View {
-        Menu {
-            let tracks = coordinator.playerLayer?.player.tracks(mediaType: .audio) ?? []
-            ForEach(tracks, id: \.trackID) { track in
-                Button {
-                    coordinator.playerLayer?.player.select(track: track)
-                } label: {
-                    if track.isEnabled {
-                        Label(track.name, systemImage: "checkmark")
-                    } else {
-                        Text(track.name)
-                    }
-                }
-            }
-        } label: {
-            Image(systemName: "waveform")
-                .font(.system(size: 16))
-                .foregroundStyle(.white)
-        }
-        .frame(width: 36, height: 36)
-    }
-
-    /// 字幕选择（内嵌字幕 + 外挂字幕；按当前 selectedSubtitleInfo 身份匹配勾选）
-    private var subtitleMenu: some View {
-        Menu {
-            Button {
-                coordinator.subtitleModel.selectedSubtitleInfo = nil
-            } label: {
-                if coordinator.subtitleModel.selectedSubtitleInfo == nil {
-                    Label("关闭字幕", systemImage: "checkmark")
+    /// 字幕选择绑定：-1 = 关闭，其余为 subtitleInfos 索引（按身份匹配勾选）
+    private var subtitleSelection: Binding<Int> {
+        Binding<Int>(
+            get: {
+                guard let sel = coordinator.subtitleModel.selectedSubtitleInfo else { return -1 }
+                return coordinator.subtitleModel.subtitleInfos.firstIndex(where: { $0.id == sel.id }) ?? -1
+            },
+            set: { idx in
+                if idx >= 0, idx < coordinator.subtitleModel.subtitleInfos.count {
+                    coordinator.subtitleModel.selectedSubtitleInfo = coordinator.subtitleModel.subtitleInfos[idx]
                 } else {
-                    Text("关闭字幕")
+                    coordinator.subtitleModel.selectedSubtitleInfo = nil
                 }
             }
-            ForEach(coordinator.subtitleModel.subtitleInfos, id: \.id) { info in
-                Button {
-                    coordinator.subtitleModel.selectedSubtitleInfo = info
-                } label: {
-                    if coordinator.subtitleModel.selectedSubtitleInfo?.id == info.id {
-                        Label(info.name, systemImage: "checkmark")
-                    } else {
-                        Text(info.name)
-                    }
-                }
-            }
-        } label: {
-            Image(systemName: "captions.bubble")
-                .font(.system(size: 16))
-                .foregroundStyle(.white)
-        }
-        .frame(width: 36, height: 36)
-    }
-
-    /// 倍速选择
-    private var playbackRateMenu: some View {
-        Menu {
-            ForEach(playbackRates, id: \.self) { rate in
-                Button {
-                    coordinator.playbackRate = rate
-                } label: {
-                    if abs(coordinator.playbackRate - rate) < 0.01 {
-                        Label(rateLabel(rate), systemImage: "checkmark")
-                    } else {
-                        Text(rateLabel(rate))
-                    }
-                }
-            }
-        } label: {
-            Image(systemName: "speedometer")
-                .font(.system(size: 16))
-                .foregroundStyle(.white)
-        }
-        .frame(width: 36, height: 36)
+        )
     }
 
     private func rateLabel(_ rate: Float) -> String {
         rate == rate.rounded() ? String(format: "%.0fx", rate) : String(format: "%.2gx", rate)
     }
 
-    // MARK: - 竖屏下方信息区（半屏播放）
+    // MARK: - 控制层显隐 / 自动隐藏
 
-    private var portraitInfoView: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text(item.name)
-                .font(.title3.bold())
-                .foregroundStyle(.primary)
-                .lineLimit(2)
-
-            HStack(spacing: 10) {
-                if let s = item.parentIndexNumber, let e = item.indexNumber {
-                    Text(String(format: "S%02d · E%02d", s, e))
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.indigo)
-                }
-                Text(item.durationString)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-
-            if playlist.count > 1 {
-                Text("选集")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(Array(playlist.enumerated()), id: \.offset) { idx, ep in
-                            Button {
-                                currentIndex = idx
-                            } label: {
-                                Text(episodeLabel(ep, idx: idx))
-                                    .font(.caption)
-                                    .lineLimit(1)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 8)
-                                    .background(
-                                        Capsule().fill(idx == currentIndex ? Color.indigo : Color(UIColor.tertiarySystemFill))
-                                    )
-                                    .foregroundStyle(idx == currentIndex ? .white : .primary)
-                            }
-                        }
-                    }
-                }
-            }
-
-            Spacer()
+    private func togglePlayPause() {
+        if coordinator.state.isPlaying {
+            coordinator.playerLayer?.pause()
+            keepControlsVisible()   // 暂停时常驻
+        } else {
+            coordinator.playerLayer?.play()
+            showControls()          // 播放后倒计时自动隐藏
         }
-        .padding()
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color(.systemBackground))
     }
+
+    /// 显示控制层并开始 4 秒自动隐藏计时
+    private func showControls() {
+        hideTask?.cancel()
+        withAnimation(.easeOut(duration: 0.2)) { controlsVisible = true }
+        coordinator.isMaskShow = true
+        scheduleAutoHide()
+    }
+
+    /// 常驻显示（拖动进度条 / 菜单打开 / 暂停 / 缓冲），不自动隐藏
+    private func keepControlsVisible() {
+        hideTask?.cancel()
+        withAnimation(.easeOut(duration: 0.2)) { controlsVisible = true }
+        coordinator.isMaskShow = true
+    }
+
+    /// 重新安排自动隐藏（仅播放中生效；暂停/缓冲常驻）
+    private func scheduleAutoHide() {
+        hideTask?.cancel()
+        // 未播放 / 暂停时常驻
+        guard coordinator.state.isPlaying else { return }
+        hideTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            if Task.isCancelled { return }
+            // 拖动中 / 音量弹窗 / 锁定态 / 缓冲中不隐藏
+            guard !isSeeking, !showVolumePopover, !isLocked,
+                  coordinator.state == .bufferFinished else { return }
+            withAnimation(.easeIn(duration: 0.35)) { controlsVisible = false }
+            coordinator.isMaskShow = false
+        }
+    }
+
+    /// 立即隐藏控制层
+    private func hideControls() {
+        hideTask?.cancel()
+        withAnimation(.easeIn(duration: 0.25)) { controlsVisible = false }
+        coordinator.isMaskShow = false
+    }
+
+    // MARK: - 选集标签（「更多」菜单使用）
 
     private func episodeLabel(_ it: MediaItem, idx: Int) -> String {
         if let s = it.parentIndexNumber, let e = it.indexNumber {
@@ -674,7 +736,7 @@ struct PlayerHostView: View {
             rebuildPlaybackURL(with: source, mode: playMode)
 
             isLoading = false
-            configureToken += 1
+            configureToken &+= 1
         } catch {
             fatalMsg = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             isLoading = false
@@ -706,26 +768,23 @@ struct PlayerHostView: View {
     }
 
     private func rebuildPlaybackURL(with source: MediaSource, mode: PlayMode) {
-        let itemId = item.id
-        let sid = playSessionId ?? UUID().uuidString
         switch mode {
         case .directStream:
-            // 不支持直连时强制走 HLS 转码
-            if source.supportsDirectStream {
-                playbackURL = EmbyClient.shared.directStreamURL(itemId: itemId, mediaSource: source)
-            }
-            if playbackURL == nil {
-                playbackURL = EmbyClient.shared.hlsTranscodeURL(
-                    itemId: itemId, mediaSource: source, playSessionId: sid, startTimeTicks: startTicks
+            playbackURL = EmbyClient.shared.directStreamURL(mediaSource: source)
+                ?? EmbyClient.shared.hlsTranscodeURL(
+                    mediaSource: source,
+                    playSessionId: playSessionId ?? UUID().uuidString,
+                    startTimeTicks: startTicks
                 )
-            }
         case .hlsTranscode:
-            if source.supportsTranscoding {
+            if source.supportsTranscoding, let sid = playSessionId {
                 playbackURL = EmbyClient.shared.hlsTranscodeURL(
-                    itemId: itemId, mediaSource: source, playSessionId: sid, startTimeTicks: startTicks
+                    mediaSource: source,
+                    playSessionId: sid,
+                    startTimeTicks: startTicks
                 )
             } else {
-                playbackURL = EmbyClient.shared.directStreamURL(itemId: itemId, mediaSource: source)
+                playbackURL = EmbyClient.shared.directStreamURL(mediaSource: source)
             }
         }
     }
@@ -740,13 +799,14 @@ struct PlayerHostView: View {
         guard let src = currentMediaSource else { return }
         configureOptions()
         rebuildPlaybackURL(with: src, mode: playMode)
-        configureToken += 1
+        configureToken &+= 1
     }
 
     // MARK: - KSPlayer 回调挂载
 
     private func installPlayer() {
         coordinator.onPlay = { current, total in
+            // 高频回调，仅把最新位置喂给上报器（上报器内部 10s 定时批量上报）
             if reporterActive {
                 PlaybackReporter.shared.updatePosition(current, isPaused: false)
             }
@@ -754,14 +814,18 @@ struct PlayerHostView: View {
         coordinator.onStateChanged = { _, state in
             switch state {
             case .paused:
+                keepControlsVisible()   // 暂停时常驻控制层
                 if reporterActive { PlaybackReporter.shared.togglePause(true) }
             case .playedToTheEnd:
                 handleCurrentFinished()
             case .buffering:
                 isBuffering = true
+                keepControlsVisible()   // 缓冲时常驻
             case .readyToPlay, .bufferFinished:
                 isBuffering = false
+                // 播放器 view 就绪后应用画面比例
                 applyScaleMode()
+                showControls()          // 开始播放：显示控制层并倒计时自动隐藏
             case .initialized, .preparing, .error:
                 break
             @unknown default:
@@ -832,47 +896,5 @@ struct PlayerHostView: View {
         guard reporterActive else { return }
         reporterActive = false
         PlaybackReporter.shared.stop(playedToCompletion: playedToCompletion)
-    }
-}
-
-// MARK: - 自定义无滑块进度条（整条可点击/拖拽 seek）
-
-private struct SeekProgressTrack: View {
-    let current: Double
-    let total: Double
-    let onSeek: (Double, Bool) -> Void     // (value, finishing)
-
-    var body: some View {
-        GeometryReader { geo in
-            let width = geo.size.width
-            let progress = min(max(current / total, 0), 1)
-            ZStack(alignment: .leading) {
-                Capsule()
-                    .fill(.white.opacity(0.25))
-                    .frame(height: 4)
-                Capsule()
-                    .fill(Color.indigo)
-                    .frame(width: width * progress, height: 4)
-            }
-            .frame(width: width, height: geo.size.height)
-            .contentShape(Rectangle())
-            .onTapGesture { point in
-                let value = Double(point.x / width) * total
-                onSeek(value, true)
-            }
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { g in
-                        let x = min(max(g.location.x, 0), width)
-                        let value = Double(x / width) * total
-                        onSeek(value, false)
-                    }
-                    .onEnded { g in
-                        let x = min(max(g.location.x, 0), width)
-                        let value = Double(x / width) * total
-                        onSeek(value, true)
-                    }
-            )
-        }
     }
 }

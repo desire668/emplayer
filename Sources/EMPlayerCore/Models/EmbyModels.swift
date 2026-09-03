@@ -85,13 +85,13 @@ public struct ProviderIdMap: Codable, Equatable, Hashable {
         }
         var dict: [String: String] = [:]
         for key in c.allKeys {
-            if let s = try? c.decodeIfPresent(String.self, forKey: key), let s {
+            if let s = try? c.decodeIfPresent(String.self, forKey: key) {
                 dict[key.stringValue] = s
-            } else if let n = try? c.decodeIfPresent(Int64.self, forKey: key), let n {
+            } else if let n = try? c.decodeIfPresent(Int64.self, forKey: key) {
                 dict[key.stringValue] = String(n)
-            } else if let d = try? c.decodeIfPresent(Double.self, forKey: key), let d {
+            } else if let d = try? c.decodeIfPresent(Double.self, forKey: key) {
                 dict[key.stringValue] = String(d)
-            } else if let b = try? c.decodeIfPresent(Bool.self, forKey: key), let b {
+            } else if let b = try? c.decodeIfPresent(Bool.self, forKey: key) {
                 dict[key.stringValue] = String(b)
             }
         }
@@ -586,9 +586,9 @@ public struct NameIdPair: Codable, Equatable, Hashable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         name = try c.decode(String.self, forKey: .name)
-        if let s = try? c.decodeIfPresent(String.self, forKey: .id), let s {
+        if let s = try? c.decodeIfPresent(String.self, forKey: .id) {
             id = s
-        } else if let n = try? c.decodeIfPresent(Int64.self, forKey: .id), let n {
+        } else if let n = try? c.decodeIfPresent(Int64.self, forKey: .id) {
             id = String(n)
         } else {
             id = nil
@@ -793,7 +793,7 @@ public struct PlaybackInfoResponse: Codable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        if let arr = try? c.decodeIfPresent([MediaSource].self, forKey: .mediaSources), let arr {
+        if let arr = try? c.decodeIfPresent([MediaSource].self, forKey: .mediaSources) {
             mediaSources = arr
         } else {
             mediaSources = []
@@ -1099,7 +1099,7 @@ public struct QueryResult<T: Codable>: Codable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        if let arr = try? c.decodeIfPresent([T].self, forKey: .items), let arr {
+        if let arr = try? c.decodeIfPresent([T].self, forKey: .items) {
             items = arr
         } else {
             items = []

@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import AVFoundation
+import Combine
 import EMPlayerCore
 import KSPlayer
 
@@ -63,6 +64,16 @@ struct PlayerHostView: View {
     // 画面比例
     @State private var scaleMode: ScaleMode = .fit
 
+    // 播放锁定（锁定后仅解锁按钮可点，防误触）
+    @State private var isLocked: Bool = false
+
+    // 横竖屏布局跟踪（控制状态栏显隐）
+    @State private var isLandscapeLayout: Bool = true
+
+    // 缓冲进度提示
+    @State private var isBuffering: Bool = false
+    @State private var bufferPercent: Double = 0
+
     // 上报 / 重建控制
     @State private var reporterActive: Bool = false
     @State private var finishedCurrent: Bool = false
@@ -115,8 +126,8 @@ struct PlayerHostView: View {
                     loadingView
                 } else if let url = playbackURL {
                     VStack(spacing: 0) {
-                        // 横屏：视频铺满；竖屏：视频保持 16:9 半屏置顶
-                        videoArea(url: url)
+                        // 横屏：视频铺满；竖屏：视频保持 16:9，从状态栏/灵动岛下方开始
+                        videoArea(url: url, isLandscape: isLandscape)
                             .frame(height: isLandscape ? geo.size.height : geo.size.width * 9.0 / 16.0)
                             .clipped()
 
@@ -124,13 +135,17 @@ struct PlayerHostView: View {
                             portraitInfoView
                         }
                     }
+                    .padding(.top, isLandscape ? 0 : geo.safeAreaInsets.top)
                 } else {
                     fatalView
                 }
             }
+            .onChange(of: isLandscape) { _, v in isLandscapeLayout = v }
+            .onAppear { isLandscapeLayout = isLandscape }
         }
         .preferredColorScheme(.dark)
-        .statusBarHidden(true)
+        // 横屏隐藏状态栏；竖屏保留（画面位于灵动岛/状态栏下方）
+        .statusBarHidden(!isLandscapeLayout)
         .background(Color.black.ignoresSafeArea())
         .task(id: item.id, priority: .high) { await resolvePlayback() }
         .onAppear {
@@ -157,7 +172,10 @@ struct PlayerHostView: View {
 
     // MARK: - 视频区域（渲染 + 手势 + 控件层）
 
-    private func videoArea(url: URL) -> some View {
+    /// 缓冲进度轮询（0.5s 一次，仅缓冲中读取 playableTime）
+    private let bufferPollPublisher = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
+
+    private func videoArea(url: URL, isLandscape: Bool) -> some View {
         ZStack {
             KSVideoPlayer(coordinator: coordinator, url: url, options: options)
                 .id(configureToken)
@@ -167,9 +185,20 @@ struct PlayerHostView: View {
             // 手动渲染 subtitleModel.parts（KSPlayerLayerDelegate 每帧驱动更新）
             subtitleOverlay
 
-            // 控制层：跟随 coordinator.isMaskShow 显隐（播放中自动隐藏）
-            controlsOverlay
-                .opacity(coordinator.isMaskShow ? 1 : 0)
+            // 缓冲进度提示（加载 / 卡顿时显示）
+            if isBuffering {
+                bufferingView
+            }
+
+            // 控制层：锁定时只显示解锁按钮
+            if isLocked {
+                unlockOverlay
+                    .opacity(coordinator.isMaskShow ? 1 : 0)
+                    .allowsHitTesting(coordinator.isMaskShow)
+            } else {
+                controlsOverlay(isLandscape: isLandscape)
+                    .opacity(coordinator.isMaskShow ? 1 : 0)
+            }
 
             if let bannerMsg {
                 Text(bannerMsg)
@@ -184,7 +213,8 @@ struct PlayerHostView: View {
         }
         .contentShape(Rectangle())
         .onTapGesture(count: 2) {
-            // 双击：播放 / 暂停
+            // 双击：播放 / 暂停（锁定时忽略）
+            guard !isLocked else { return }
             if coordinator.state.isPlaying {
                 coordinator.playerLayer?.pause()
             } else {
@@ -192,8 +222,17 @@ struct PlayerHostView: View {
             }
         }
         .onTapGesture {
-            // 单击：显隐控制层（播放中自动倒计时隐藏）
+            // 单击：显隐控制层（播放中自动倒计时隐藏；锁定时用于唤出解锁按钮）
             coordinator.mask(show: !coordinator.isMaskShow)
+        }
+        // 缓冲进度轮询：可播放时长 / 总时长
+        .onReceive(bufferPollPublisher) { _ in
+            guard isBuffering else { return }
+            let total = Double(coordinator.timemodel.totalTime)
+            let playable = coordinator.playerLayer?.player.playableTime ?? 0
+            if total > 0 {
+                bufferPercent = min(1, max(0, playable / total))
+            }
         }
         // SubtitleModel 是嵌套 ObservableObject，需手动同步到视图状态
         .onReceive(coordinator.subtitleModel.$parts) { subtitleParts = $0 }
@@ -230,23 +269,73 @@ struct PlayerHostView: View {
         .allowsHitTesting(false)
     }
 
+    // MARK: - 缓冲提示 / 锁定层
+
+    private var bufferingView: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .controlSize(.large)
+                .tint(.white)
+            Text(bufferPercent > 0.001 ? String(format: "正在缓冲 %.0f%%", bufferPercent * 100) : "正在缓冲…")
+                .font(.footnote)
+                .foregroundStyle(.white.opacity(0.85))
+        }
+        .padding(24)
+        .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    /// 锁定态：仅保留解锁按钮（单击屏幕唤出）
+    private var unlockOverlay: some View {
+        VStack {
+            HStack {
+                Spacer()
+                Button {
+                    isLocked = false
+                } label: {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 20))
+                        .foregroundStyle(.white)
+                        .frame(width: 40, height: 40)
+                        .background(.black.opacity(0.55), in: Circle())
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 10)
+            }
+            Spacer()
+        }
+    }
+
     // MARK: - 控制层
 
-    private var controlsOverlay: some View {
+    private func controlsOverlay(isLandscape: Bool) -> some View {
         VStack(spacing: 0) {
-            topBar
+            topBar(isLandscape: isLandscape)
             Spacer()
             bottomBar
         }
     }
 
-    private var topBar: some View {
+    private func topBar(isLandscape: Bool) -> some View {
         HStack(spacing: 12) {
             Button {
                 dismiss()
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 40, height: 40)
+                    .background(.black.opacity(0.35), in: Circle())
+            }
+            Button {
+                // 播放页内横竖屏切换
+                if isLandscape {
+                    OrientationManager.shared.rotateToPortrait()
+                } else {
+                    OrientationManager.shared.rotateToLandscape()
+                }
+            } label: {
+                Image(systemName: isLandscape ? "rectangle.portrait.rotate" : "rectangle.landscape.rotate")
+                    .font(.system(size: 20))
                     .foregroundStyle(.white)
                     .frame(width: 40, height: 40)
                     .background(.black.opacity(0.35), in: Circle())
@@ -329,6 +418,16 @@ struct PlayerHostView: View {
 
             // 按钮行
             HStack(spacing: 26) {
+                // 播放锁定
+                Button {
+                    isLocked = true
+                    coordinator.mask(show: true)
+                } label: {
+                    Image(systemName: "lock.open.fill")
+                        .font(.system(size: 22))
+                        .foregroundStyle(.white)
+                }
+
                 // 播放 / 暂停
                 Button {
                     if coordinator.state.isPlaying {
@@ -698,10 +797,13 @@ struct PlayerHostView: View {
                 if reporterActive { PlaybackReporter.shared.togglePause(true) }
             case .playedToTheEnd:
                 handleCurrentFinished()
+            case .buffering:
+                isBuffering = true
             case .readyToPlay, .bufferFinished:
+                isBuffering = false
                 // 播放器 view 就绪后应用画面比例
                 applyScaleMode()
-            case .initialized, .preparing, .buffering, .error:
+            case .initialized, .preparing, .error:
                 break
             @unknown default:
                 break

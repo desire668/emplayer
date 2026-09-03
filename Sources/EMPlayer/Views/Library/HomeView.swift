@@ -30,12 +30,37 @@ struct MainTabView: View {
     }
 }
 
-// MARK: - Home (Continue Watching + Server Views Categories)
+// MARK: - Home (Continue Watching + Favorites + Server Views Categories)
+
+/// 首页媒体库区块排序方式
+enum HomeSortOption: String, CaseIterable, Identifiable {
+    case dateAdded = "最近添加"
+    case name = "名称"
+    case year = "上映年份"
+    var id: String { rawValue }
+
+    var sortBy: String {
+        switch self {
+        case .dateAdded: return "DateCreated"
+        case .name: return "SortName"
+        case .year: return "ProductionYear"
+        }
+    }
+    var sortOrder: String {
+        switch self {
+        case .name: return "Ascending"
+        default: return "Descending"
+        }
+    }
+}
 
 struct HomeView: View {
     @EnvironmentObject var appState: AppState
     @State private var resume: [MediaItem] = []
+    @State private var favorites: [MediaItem] = []
     @State private var sections: [(folder: MediaFolder, items: [MediaItem])] = []
+    // 每个媒体库区块的排序（folderId -> 排序方式），默认最近添加
+    @State private var sortOptions: [String: HomeSortOption] = [:]
     @State private var loading: Bool = true
     @State private var loadTask: Task<Void, Never>?
 
@@ -56,7 +81,16 @@ struct HomeView: View {
                             }
                         } header: { SectionHeader(title: "继续观看", systemImage: "play.circle.fill") }
 
-                        // 各服务器媒体库分类
+                        // 收藏
+                        Section {
+                            PosterRow(items: favorites) { item in
+                                PosterCard(item: item)
+                            } emptyView: {
+                                EmptyHint(label: "暂无收藏内容", systemImage: "heart")
+                            }
+                        } header: { SectionHeader(title: "收藏", systemImage: "heart.fill") }
+
+                        // 各服务器媒体库分类（名称取自服务器，可切换排序）
                         ForEach(Array(sections.enumerated()), id: \.offset) { idx, section in
                             Section {
                                 PosterRow(items: section.items) { item in
@@ -65,7 +99,17 @@ struct HomeView: View {
                                     EmptyHint(label: "暂无内容", systemImage: "film.stack")
                                 }
                             } header: {
-                                SectionHeader(title: section.folder.collectionName, systemImage: section.folder.sfSymbol)
+                                SectionHeader(
+                                    title: section.folder.collectionName,
+                                    systemImage: section.folder.sfSymbol,
+                                    sortBinding: Binding(
+                                        get: { sortOptions[section.folder.id] ?? .dateAdded },
+                                        set: { sortOptions[section.folder.id] = $0 }
+                                    ),
+                                    onSortChange: { sort in
+                                        Task { await reloadFolder(section.folder, sort: sort) }
+                                    }
+                                )
                             }
                         }
                     }
@@ -88,9 +132,18 @@ struct HomeView: View {
         loading = true
         let task = Task {
             do {
-                // 1. 加载继续观看（独立容错）
+                // 1. 加载继续观看 + 收藏（独立容错）
                 async let r1: QueryResult<MediaItem>? = loadSection {
                     try await EmbyClient.shared.getResumeItems(limit: 20)
+                }
+                async let r2: QueryResult<MediaItem>? = loadSection {
+                    try await EmbyClient.shared.getItems(
+                        sortBy: ["DateCreated"],
+                        sortOrder: "Descending",
+                        recursive: true,
+                        limit: 20,
+                        isFavorite: true
+                    )
                 }
 
                 // 2. 加载服务器 Views（媒体库分类）
@@ -105,15 +158,16 @@ struct HomeView: View {
                     }
                 }
 
-                // 3. 并发加载每个 View 的最新内容
+                // 3. 并发加载每个 View 的最新内容（按各自排序）
                 let folderResults = await withTaskGroup(of: (folder: MediaFolder, items: [MediaItem]).self) { group in
                     for folder in folders {
                         group.addTask { [folder] in
                             do {
+                                let sort = await MainActor.run { sortOptions[folder.id] ?? .dateAdded }
                                 let result = try await EmbyClient.shared.getItems(
                                     parentId: folder.id,
-                                    sortBy: ["DateCreated"],
-                                    sortOrder: "Descending",
+                                    sortBy: [sort.sortBy],
+                                    sortOrder: sort.sortOrder,
                                     recursive: true,
                                     limit: 20
                                 )
@@ -132,8 +186,10 @@ struct HomeView: View {
 
                 try Task.checkCancellation()
                 let resumeResult = await r1
+                let favResult = await r2
                 await MainActor.run {
                     resume = resumeResult?.items ?? []
+                    favorites = favResult?.items ?? []
                     sections = folderResults.filter { !$0.items.isEmpty }
                     loading = false
                 }
@@ -147,6 +203,27 @@ struct HomeView: View {
             }
         }
         loadTask = task
+    }
+
+    /// 排序切换后单库刷新（只更新该区块，不整页 reload）
+    private func reloadFolder(_ folder: MediaFolder, sort: HomeSortOption) async {
+        guard let idx = sections.firstIndex(where: { $0.folder.id == folder.id }) else { return }
+        let result = await loadSection {
+            try await EmbyClient.shared.getItems(
+                parentId: folder.id,
+                sortBy: [sort.sortBy],
+                sortOrder: sort.sortOrder,
+                recursive: true,
+                limit: 20
+            )
+        }
+        if let r = result, !Task.isCancelled {
+            await MainActor.run {
+                if sections.indices.contains(idx) {
+                    sections[idx] = (folder: folder, items: r.items)
+                }
+            }
+        }
     }
 
     /// 单个首页区块的容错加载：失败时弹出错误横幅并返回 nil（区块显示空态），不影响其他区块
@@ -167,12 +244,38 @@ struct SectionHeader: View {
     let title: String
     let systemImage: String
     var action: (() -> Void)? = nil
-    
+    var sortBinding: Binding<HomeSortOption>? = nil
+    var onSortChange: ((HomeSortOption) -> Void)? = nil
+
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
             Label(title, systemImage: systemImage)
                 .font(.title3.bold())
             Spacer()
+            if let sb = sortBinding {
+                Menu {
+                    ForEach(HomeSortOption.allCases) { opt in
+                        Button {
+                            guard sb.wrappedValue != opt else { return }
+                            sb.wrappedValue = opt
+                            onSortChange?(opt)
+                        } label: {
+                            if sb.wrappedValue == opt {
+                                Label(opt.rawValue, systemImage: "checkmark")
+                            } else {
+                                Text(opt.rawValue)
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.up.arrow.down")
+                        Text(sb.wrappedValue.rawValue)
+                    }
+                    .font(.footnote)
+                    .foregroundStyle(.indigo)
+                }
+            }
             if let a = action {
                 Button("查看全部", action: a)
                     .font(.footnote)

@@ -22,6 +22,18 @@ final class OrientationManager {
         requestOrientation(.portrait, preferred: .portrait)
     }
 
+    /// 播放页内：切到横屏（保持播放页方向自由）
+    func rotateToLandscape() {
+        isPlayerActive = true
+        requestOrientation(.allButUpsideDown, preferred: .landscapeRight)
+    }
+
+    /// 播放页内：切到竖屏（仍允许随时切回横屏）
+    func rotateToPortrait() {
+        isPlayerActive = true
+        requestOrientation(.allButUpsideDown, preferred: .portrait)
+    }
+
     private func requestOrientation(_ supported: UIInterfaceOrientationMask, preferred: UIInterfaceOrientationMask) {
         DispatchQueue.main.async {
             let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }

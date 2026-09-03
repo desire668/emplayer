@@ -1144,22 +1144,11 @@ public struct MediaFolder: Codable, Identifiable, Equatable, Hashable {
         case collectionType = "CollectionType"
     }
     
+    /// 显示名称：直接使用服务器上的媒体库命名（服务器改名后客户端同步显示）
     public var collectionName: String {
-        guard let type = collectionType?.lowercased() else { return name }
-        switch type {
-        case "movies": return "电影"
-        case "tvshows": return "剧集"
-        case "music": return "音乐"
-        case "boxsets": return "合集"
-        case "books": return "图书"
-        case "mixed": return "混合内容"
-        case "homevideos": return "家庭视频"
-        case "photos": return "照片"
-        case "livetv": return "直播电视"
-        case "playlists": return "播放列表"
-        case "folders": return "文件夹"
-        default: return name
-        }
+        if !name.isEmpty { return name }
+        guard let type = collectionType?.lowercased() else { return "媒体库" }
+        return type
     }
     
     public var sfSymbol: String {

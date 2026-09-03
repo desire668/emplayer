@@ -98,10 +98,18 @@ public enum MediaTypeUtils {
     }
     
     public static func displayTitle(_ item: MediaItem) -> String {
+        let isEpisode = (item.type ?? "").caseInsensitiveCompare("Episode") == .orderedSame
+        // 集的 Name 常是未刮削的文件名，优先显示剧名 + 季集号
+        if isEpisode, let series = item.seriesName, !series.isEmpty {
+            if let s = item.parentIndexNumber, let e = item.indexNumber {
+                return String(format: "%@ · S%02d E%02d", series, s, e)
+            }
+            return series
+        }
         if let season = item.parentIndexNumber, let ep = item.indexNumber {
             return String(format: "S%02d E%02d  %@", season, ep, item.name)
         }
-        if let ep = item.indexNumber, (item.type ?? "").caseInsensitiveCompare("Episode") == .orderedSame {
+        if let ep = item.indexNumber, isEpisode {
             return String(format: "E%02d  %@", ep, item.name)
         }
         return item.name

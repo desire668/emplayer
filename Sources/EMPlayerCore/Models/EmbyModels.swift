@@ -17,18 +17,18 @@ struct AnyCodingKey: CodingKey {
 extension KeyedDecodingContainer {
     /// 字符串：字段缺失 / null / 类型不符均返回 nil；数字与布尔会被转成字符串
     func lenientString(forKey key: Key) -> String? {
-        if let s = try? decodeIfPresent(String.self, forKey: key), let s { return s }
-        if let n = try? decodeIfPresent(Int64.self, forKey: key), let n { return String(n) }
-        if let d = try? decodeIfPresent(Double.self, forKey: key), let d { return String(d) }
-        if let b = try? decodeIfPresent(Bool.self, forKey: key), let b { return String(b) }
+        if let s = try? decodeIfPresent(String.self, forKey: key) { return s }
+        if let n = try? decodeIfPresent(Int64.self, forKey: key) { return String(n) }
+        if let d = try? decodeIfPresent(Double.self, forKey: key) { return String(d) }
+        if let b = try? decodeIfPresent(Bool.self, forKey: key) { return String(b) }
         return nil
     }
 
     /// 布尔：兼容 0/1 数字与 "true"/"false" 字符串；缺失或 null 返回 default
     func lenientBool(forKey key: Key, default def: Bool = false) -> Bool {
-        if let b = try? decodeIfPresent(Bool.self, forKey: key), let b { return b }
-        if let n = try? decodeIfPresent(Int.self, forKey: key), let n { return n != 0 }
-        if let s = try? decodeIfPresent(String.self, forKey: key), let s {
+        if let b = try? decodeIfPresent(Bool.self, forKey: key) { return b }
+        if let n = try? decodeIfPresent(Int.self, forKey: key) { return n != 0 }
+        if let s = try? decodeIfPresent(String.self, forKey: key) {
             switch s.lowercased() {
             case "true", "1": return true
             case "false", "0": return false
@@ -40,31 +40,31 @@ extension KeyedDecodingContainer {
 
     /// Int：兼容数字字符串
     func lenientInt(forKey key: Key) -> Int? {
-        if let n = try? decodeIfPresent(Int.self, forKey: key), let n { return n }
-        if let d = try? decodeIfPresent(Double.self, forKey: key), let d { return Int(d) }
-        if let s = try? decodeIfPresent(String.self, forKey: key), let s { return Int(s) }
+        if let n = try? decodeIfPresent(Int.self, forKey: key) { return n }
+        if let d = try? decodeIfPresent(Double.self, forKey: key) { return Int(d) }
+        if let s = try? decodeIfPresent(String.self, forKey: key) { return Int(s) }
         return nil
     }
 
     /// Int64：兼容数字字符串（ticks / size 等大数值）
     func lenientInt64(forKey key: Key) -> Int64? {
-        if let n = try? decodeIfPresent(Int64.self, forKey: key), let n { return n }
-        if let d = try? decodeIfPresent(Double.self, forKey: key), let d { return Int64(d) }
-        if let s = try? decodeIfPresent(String.self, forKey: key), let s { return Int64(s) }
+        if let n = try? decodeIfPresent(Int64.self, forKey: key) { return n }
+        if let d = try? decodeIfPresent(Double.self, forKey: key) { return Int64(d) }
+        if let s = try? decodeIfPresent(String.self, forKey: key) { return Int64(s) }
         return nil
     }
 
     /// Double：兼容数字字符串
     func lenientDouble(forKey key: Key) -> Double? {
-        if let d = try? decodeIfPresent(Double.self, forKey: key), let d { return d }
-        if let s = try? decodeIfPresent(String.self, forKey: key), let s { return Double(s) }
+        if let d = try? decodeIfPresent(Double.self, forKey: key) { return d }
+        if let s = try? decodeIfPresent(String.self, forKey: key) { return Double(s) }
         return nil
     }
 
     /// 枚举字段：正常返回字符串名；个别版本/场景返回数字时按 numericMapping 转换
     func lenientEnumName(forKey key: Key, numericMapping: [Int: String]) -> String? {
-        if let s = try? decodeIfPresent(String.self, forKey: key), let s, !s.isEmpty { return s }
-        if let n = try? decodeIfPresent(Int.self, forKey: key), let n { return numericMapping[n] }
+        if let s = try? decodeIfPresent(String.self, forKey: key), !s.isEmpty { return s }
+        if let n = try? decodeIfPresent(Int.self, forKey: key) { return numericMapping[n] }
         return nil
     }
 }

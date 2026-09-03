@@ -9,6 +9,7 @@ public final class AppState: ObservableObject {
     
     // MARK: Published state
     
+    @Published public private(set) var isAutoConnecting: Bool = false
     @Published public private(set) var isLoggedIn: Bool = false
     @Published public private(set) var currentUser: EmbyUser?
     @Published public private(set) var currentServer: EmbyServer?
@@ -26,6 +27,9 @@ public final class AppState: ObservableObject {
     // MARK: - Connection & Login
     
     public func connect(to server: EmbyServer) async {
+        isAutoConnecting = true
+        defer { isAutoConnecting = false }
+
         var server = server
         currentServer = server
         EmbyClient.shared.setServer(server)
@@ -49,6 +53,8 @@ public final class AppState: ObservableObject {
             updated.lastConnected = Date()
             ServerStore.shared.add(server: updated)
             currentServer = updated
+            invalidateCache()
+            await loadLibraries(force: true)
         } catch {
             // 自签名 HTTPS 兜底：旧记录可能没开 skipSSL，自动信任证书后重试一次
             if server.scheme == "https", !server.skipSSL, EmbyAPIError.isTLSTrustFailure(error) {
@@ -67,6 +73,8 @@ public final class AppState: ObservableObject {
                     updated.lastConnected = Date()
                     ServerStore.shared.add(server: updated)
                     currentServer = updated
+                    invalidateCache()
+                    await loadLibraries(force: true)
                     return
                 } catch {
                     handleError(error, fallback: "登录已过期，请重新登录")

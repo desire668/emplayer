@@ -8,7 +8,18 @@ struct RootView: View {
     
     var body: some View {
         Group {
-            if !appState.isLoggedIn {
+            if appState.isAutoConnecting {
+                // 自动连接中（已有服务器但还在验证）→ 显示全屏 loading 占位
+                VStack(spacing: 16) {
+                    ProgressView()
+                        .controlSize(.large)
+                    Text("正在连接服务器…")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.black.ignoresSafeArea())
+            } else if !appState.isLoggedIn {
                 if serverStore.servers.isEmpty {
                     ServerAddView()
                 } else {
@@ -16,6 +27,7 @@ struct RootView: View {
                 }
             } else {
                 MainTabView()
+                    .id(appState.currentUser?.id ?? UUID().uuidString)
             }
         }
         .overlay(alignment: .top) {

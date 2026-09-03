@@ -127,7 +127,8 @@ struct ItemDetailView: View {
                     if isSeries(effectiveItem) || isSeason(effectiveItem) {
                         Spacer(minLength: 150)
                     }
-                    Text(effectiveItem.name)
+                    // 标题：短标题正常显示；超长标题横向轮播（无额外高度）
+                    MarqueeTitle(text: effectiveItem.name)
                         .font(.title2.bold())
                         .lineLimit(2)
                     if let subtitle = effectiveItem.originalTitle, !subtitle.isEmpty && subtitle != effectiveItem.name {
@@ -284,7 +285,8 @@ struct ItemDetailView: View {
     
     private var seriesContent: some View {
         Group {
-            if !seasons.isEmpty {
+            // 单季（或 0 季）不显示「季」选择器
+            if seasons.count > 1 {
                 Section {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 12) {
@@ -519,6 +521,61 @@ struct ItemDetailView: View {
 }
 
 // MARK: - Episode Row
+
+// MARK: - 超长标题轮播
+
+/// 短标题正常显示；超长标题在单行内横向循环滚动（不增加额外高度）
+struct MarqueeTitle: View {
+    let text: String
+    @State private var offset: CGFloat = 0
+    @State private var contentWidth: CGFloat = 0
+    @State private var containerWidth: CGFloat = 0
+    @State private var shouldMarquee: Bool = false
+
+    var body: some View {
+        GeometryReader { geo in
+            let container = geo.size.width
+            HStack(spacing: 0) {
+                Text(text)
+                    .background(
+                        GeometryReader { proxy in
+                            Color.clear.preference(key: MarqueeWidthKey.self, value: proxy.size.width)
+                        }
+                    )
+                if shouldMarquee {
+                    Text("  " + text)
+                }
+            }
+            .offset(x: shouldMarquee ? offset : 0)
+            .onAppear { containerWidth = container; startMarqueeIfNeeded() }
+            .onChange(of: text) { _, _ in offset = 0; startMarqueeIfNeeded() }
+            .onPreferenceChange(MarqueeWidthKey.self) { w in
+                contentWidth = w
+                shouldMarquee = w > containerWidth
+                if shouldMarquee { startMarqueeIfNeeded() }
+            }
+            .onChange(of: container) { _, v in containerWidth = v; shouldMarquee = contentWidth > v }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func startMarqueeIfNeeded() {
+        offset = 0
+        guard shouldMarquee else { return }
+        let total = contentWidth + 12
+        let duration = max(4, total / 30)
+        withAnimation(.linear(duration: duration).repeatForever(autoreverses: false)) {
+            offset = -contentWidth - 6
+        }
+    }
+}
+
+private struct MarqueeWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
 
 struct EpisodeRow: View {
     let item: MediaItem

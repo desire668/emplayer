@@ -127,23 +127,78 @@ struct PlayerHostView: View {
                 if isLoading {
                     loadingView
                 } else if let url = playbackURL {
+                    // 视频渲染层（纯渲染，不含控制层）
                     if isLandscape {
-                        // 横屏：视频铺满
-                        videoArea(url: url, isLandscape: isLandscape)
+                        KSVideoPlayer(coordinator: coordinator, url: url, options: options)
+                            .id(configureToken)
+                            .onAppear { installPlayer() }
                             .frame(width: geo.size.width, height: geo.size.height)
+                        subtitleOverlay
+                        if isBuffering { bufferingView }
                     } else {
-                        // 竖屏：画面垂直居中（避开灵动岛与底部黑区）
-                        ZStack {
-                            videoArea(url: url, isLandscape: isLandscape)
+                        // 竖屏：画面在顶部 16:9，下方空出放控件
+                        VStack(spacing: 0) {
+                            KSVideoPlayer(coordinator: coordinator, url: url, options: options)
+                                .id(configureToken)
+                                .onAppear { installPlayer() }
                                 .frame(width: geo.size.width, height: geo.size.width * 9.0 / 16.0)
                                 .clipped()
+                            Spacer()
                         }
                         .frame(width: geo.size.width, height: geo.size.height - topInset)
                         .padding(.top, topInset)
+                        subtitleOverlay
+                        if isBuffering { bufferingView }
                     }
                 } else {
                     fatalView
                 }
+
+                // 横幅错误提示（独立层）
+                if let bannerMsg {
+                    Text(bannerMsg)
+                        .font(.caption)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(.red.opacity(0.85), in: Capsule())
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        .padding(.top, 52)
+                }
+
+                // 控制层（覆盖整个屏幕；锁定时只显示解锁按钮）
+                if isLocked {
+                    unlockOverlay
+                        .opacity(coordinator.isMaskShow ? 1 : 0)
+                        .allowsHitTesting(coordinator.isMaskShow)
+                } else {
+                    controlsOverlay(isLandscape: isLandscape, geo: geo)
+                        .opacity(coordinator.isMaskShow ? 1 : 0)
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) {
+                guard !isLocked else { return }
+                if coordinator.state.isPlaying {
+                    coordinator.playerLayer?.pause()
+                } else {
+                    coordinator.playerLayer?.play()
+                }
+            }
+            .onTapGesture {
+                coordinator.mask(show: !coordinator.isMaskShow)
+            }
+            .onReceive(bufferPollPublisher) { _ in
+                guard isBuffering else { return }
+                let total = Double(coordinator.timemodel.totalTime)
+                let playable = coordinator.playerLayer?.player.playableTime ?? 0
+                if total > 0 {
+                    bufferPercent = min(1, max(0, playable / total))
+                }
+            }
+            .onReceive(coordinator.subtitleModel.$parts) { subtitleParts = $0 }
+            .onReceive(coordinator.subtitleModel.$selectedSubtitleInfo) { _ in
+                subtitleParts = coordinator.subtitleModel.parts
             }
             .onChange(of: isLandscape) { _, v in isLandscapeLayout = v }
             .onAppear { isLandscapeLayout = isLandscape }
@@ -152,9 +207,7 @@ struct PlayerHostView: View {
         .statusBarHidden(!isLandscapeLayout)
         .background(Color.black.ignoresSafeArea())
         .task(id: item.id, priority: .high) { await resolvePlayback() }
-        .onAppear {
-            OrientationManager.shared.lockLandscape()
-        }
+        .onAppear { OrientationManager.shared.lockLandscape() }
         .onDisappear {
             OrientationManager.shared.lockPortrait()
             teardownReporter(playedToCompletion: guessPlayedToCompletion())
@@ -164,87 +217,14 @@ struct PlayerHostView: View {
             let next = playlist[idx]
             item = next
             startTicks = next.playbackPositionTicks
-            // item.id 变化会自动触发上面的 .task(id: item.id) 重新解析播放
         }
-        .onChange(of: playMode) { _, _ in
-            reloadWithCurrentSource()
-        }
-        .onChange(of: scaleMode) { _, _ in
-            applyScaleMode()
-        }
+        .onChange(of: playMode) { _, _ in reloadWithCurrentSource() }
+        .onChange(of: scaleMode) { _, _ in applyScaleMode() }
     }
 
-    // MARK: - 视频区域（渲染 + 手势 + 控件层）
+    // MARK: - 缓冲轮询（0.5s 一次）
 
-    /// 缓冲进度轮询（0.5s 一次，仅缓冲中读取 playableTime）
     private let bufferPollPublisher = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
-
-    private func videoArea(url: URL, isLandscape: Bool) -> some View {
-        ZStack {
-            KSVideoPlayer(coordinator: coordinator, url: url, options: options)
-                .id(configureToken)
-                .onAppear { installPlayer() }
-
-            // 字幕渲染层：KSVideoPlayer 底层视图不带字幕 UI，
-            // 手动渲染 subtitleModel.parts（KSPlayerLayerDelegate 每帧驱动更新）
-            subtitleOverlay
-
-            // 缓冲进度提示（加载 / 卡顿时显示）
-            if isBuffering {
-                bufferingView
-            }
-
-            // 控制层：锁定时只显示解锁按钮
-            if isLocked {
-                unlockOverlay
-                    .opacity(coordinator.isMaskShow ? 1 : 0)
-                    .allowsHitTesting(coordinator.isMaskShow)
-            } else {
-                controlsOverlay(isLandscape: isLandscape)
-                    .opacity(coordinator.isMaskShow ? 1 : 0)
-            }
-
-            if let bannerMsg {
-                Text(bannerMsg)
-                    .font(.caption)
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(.red.opacity(0.85), in: Capsule())
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    .padding(.top, 52)
-            }
-        }
-        .contentShape(Rectangle())
-        .onTapGesture(count: 2) {
-            // 双击：播放 / 暂停（锁定时忽略）
-            guard !isLocked else { return }
-            if coordinator.state.isPlaying {
-                coordinator.playerLayer?.pause()
-            } else {
-                coordinator.playerLayer?.play()
-            }
-        }
-        .onTapGesture {
-            // 单击：显隐控制层（播放中自动倒计时隐藏；锁定时用于唤出解锁按钮）
-            coordinator.mask(show: !coordinator.isMaskShow)
-        }
-        // 缓冲进度轮询：可播放时长 / 总时长
-        .onReceive(bufferPollPublisher) { _ in
-            guard isBuffering else { return }
-            let total = Double(coordinator.timemodel.totalTime)
-            let playable = coordinator.playerLayer?.player.playableTime ?? 0
-            if total > 0 {
-                bufferPercent = min(1, max(0, playable / total))
-            }
-        }
-        // SubtitleModel 是嵌套 ObservableObject，需手动同步到视图状态
-        .onReceive(coordinator.subtitleModel.$parts) { subtitleParts = $0 }
-        .onReceive(coordinator.subtitleModel.$selectedSubtitleInfo) { _ in
-            // 切换字幕轨后立即刷新一次
-            subtitleParts = coordinator.subtitleModel.parts
-        }
-    }
 
     // MARK: - 字幕渲染层
 
@@ -290,9 +270,9 @@ struct PlayerHostView: View {
 
     // MARK: - 控制层（重构：浮动关闭 + 右侧锁定 + 单胶囊底栏）
 
-    private func controlsOverlay(isLandscape: Bool) -> some View {
+    private func controlsOverlay(isLandscape: Bool, geo: GeometryProxy) -> some View {
         ZStack(alignment: .topTrailing) {
-            // 顶：浮动关闭 X（embyMenu 已移除）
+            // 顶：浮动关闭 X
             VStack {
                 HStack {
                     Button {
@@ -311,8 +291,9 @@ struct PlayerHostView: View {
                 Spacer()
                 bottomBar(isLandscape: isLandscape)
             }
+            .frame(width: geo.size.width, height: geo.size.height)
 
-            // 锁定按钮：画面右侧居中（避开灵动岛；顶栏 embyMenu 已移除，无其他冲突）
+            // 锁定按钮：**屏幕右侧垂直居中**（而非视频区右侧）
             if !isLocked {
                 VStack {
                     Spacer()
@@ -326,10 +307,10 @@ struct PlayerHostView: View {
                     }
                     .frame(width: 40, height: 40)
                     .background(.ultraThinMaterial, in: Capsule())
-                    .padding(.trailing, 8)
                     Spacer()
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(width: geo.size.width, height: geo.size.height, alignment: .trailing)
+                .padding(.trailing, 8)
             }
         }
     }
@@ -468,29 +449,27 @@ struct PlayerHostView: View {
         .frame(width: 36, height: 36)
     }
 
-    /// 音轨选择（按当前选中 track 勾选，而非 isEnabled 全部勾选）
-    @ViewBuilder
+    /// 音轨选择：始终渲染按钮；菜单项在 readyToPlay 后自动出现（playerLayer 由 @StateObject 驱动重绘）
     private var audioTrackMenu: some View {
-        if let tracks = coordinator.playerLayer?.player.tracks(mediaType: .audio), !tracks.isEmpty {
-            Menu {
-                ForEach(tracks, id: \.trackID) { track in
-                    Button {
-                        coordinator.playerLayer?.player.select(track: track)
-                    } label: {
-                        if track.isEnabled {
-                            Label(track.name, systemImage: "checkmark")
-                        } else {
-                            Text(track.name)
-                        }
+        Menu {
+            let tracks = coordinator.playerLayer?.player.tracks(mediaType: .audio) ?? []
+            ForEach(tracks, id: \.trackID) { track in
+                Button {
+                    coordinator.playerLayer?.player.select(track: track)
+                } label: {
+                    if track.isEnabled {
+                        Label(track.name, systemImage: "checkmark")
+                    } else {
+                        Text(track.name)
                     }
                 }
-            } label: {
-                Image(systemName: "waveform")
-                    .font(.system(size: 16))
-                    .foregroundStyle(.white)
             }
-            .frame(width: 36, height: 36)
+        } label: {
+            Image(systemName: "waveform")
+                .font(.system(size: 16))
+                .foregroundStyle(.white)
         }
+        .frame(width: 36, height: 36)
     }
 
     /// 字幕选择（内嵌字幕 + 外挂字幕；按当前 selectedSubtitleInfo 身份匹配勾选）
@@ -693,7 +672,7 @@ struct PlayerHostView: View {
             rebuildPlaybackURL(with: source, mode: playMode)
 
             isLoading = false
-            configureToken &+= 1
+            configureToken += 1
         } catch {
             fatalMsg = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             isLoading = false
@@ -756,19 +735,19 @@ struct PlayerHostView: View {
         guard let src = currentMediaSource else { return }
         configureOptions()
         rebuildPlaybackURL(with: src, mode: playMode)
-        configureToken &+= 1
+        configureToken += 1
     }
 
     // MARK: - KSPlayer 回调挂载
 
     private func installPlayer() {
         coordinator.onPlay = { current, total in
-            // 高频回调，仅把最新位置喂给上报器（上报器内部 10s 定时批量上报）
             if reporterActive {
                 PlaybackReporter.shared.updatePosition(current, isPaused: false)
             }
         }
-        coordinator.onStateChanged = { _, state in
+        coordinator.onStateChanged = { [weak self] _, state in
+            guard let self else { return }
             switch state {
             case .paused:
                 if reporterActive { PlaybackReporter.shared.togglePause(true) }
@@ -778,7 +757,6 @@ struct PlayerHostView: View {
                 isBuffering = true
             case .readyToPlay, .bufferFinished:
                 isBuffering = false
-                // 播放器 view 就绪后应用画面比例
                 applyScaleMode()
             case .initialized, .preparing, .error:
                 break

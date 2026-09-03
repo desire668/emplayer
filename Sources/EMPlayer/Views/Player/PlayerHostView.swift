@@ -127,19 +127,20 @@ struct PlayerHostView: View {
                 if isLoading {
                     loadingView
                 } else if let url = playbackURL {
-                    VStack(spacing: 0) {
-                        // 横屏：视频铺满；竖屏：视频保持 16:9，从灵动岛下方额外留 14pt 间距
+                    if isLandscape {
+                        // 横屏：视频铺满
                         videoArea(url: url, isLandscape: isLandscape)
-                            .frame(width: isLandscape ? geo.size.width : geo.size.width,
-                                   height: isLandscape ? geo.size.height : geo.size.width * 9.0 / 16.0)
-                            .clipped()
-
-                        if !isLandscape {
-                            portraitInfoView
+                            .frame(width: geo.size.width, height: geo.size.height)
+                    } else {
+                        // 竖屏：画面垂直居中（避开灵动岛与底部黑区）
+                        ZStack {
+                            videoArea(url: url, isLandscape: isLandscape)
+                                .frame(width: geo.size.width, height: geo.size.width * 9.0 / 16.0)
+                                .clipped()
                         }
+                        .frame(width: geo.size.width, height: geo.size.height - topInset)
+                        .padding(.top, topInset)
                     }
-                    .frame(width: geo.size.width)
-                    .padding(.top, topInset)
                 } else {
                     fatalView
                 }
@@ -148,7 +149,6 @@ struct PlayerHostView: View {
             .onAppear { isLandscapeLayout = isLandscape }
         }
         .preferredColorScheme(.dark)
-        // 横屏隐藏状态栏；竖屏保留（画面位于灵动岛/状态栏下方）
         .statusBarHidden(!isLandscapeLayout)
         .background(Color.black.ignoresSafeArea())
         .task(id: item.id, priority: .high) { await resolvePlayback() }
@@ -288,14 +288,13 @@ struct PlayerHostView: View {
         .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
-    // MARK: - 控制层（重构：浮动关闭 + 锁定侧边 + 单胶囊底栏）
+    // MARK: - 控制层（重构：浮动关闭 + 右侧锁定 + 单胶囊底栏）
 
     private func controlsOverlay(isLandscape: Bool) -> some View {
-        ZStack {
-            // 顶：浮动关闭 + Emby 菜单（无胶囊）
+        ZStack(alignment: .topTrailing) {
+            // 顶：浮动关闭 X（embyMenu 已移除）
             VStack {
                 HStack {
-                    // 关闭
                     Button {
                         dismiss()
                     } label: {
@@ -306,7 +305,6 @@ struct PlayerHostView: View {
                             .background(.ultraThinMaterial, in: Capsule())
                     }
                     Spacer()
-                    embyMenu
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, isLandscape ? 10 : 0)
@@ -314,9 +312,10 @@ struct PlayerHostView: View {
                 bottomBar(isLandscape: isLandscape)
             }
 
-            // 锁定按钮：画面左侧居中（仅未锁定时显示，解锁按钮在解锁叠加层中）
+            // 锁定按钮：画面右侧居中（避开灵动岛；顶栏 embyMenu 已移除，无其他冲突）
             if !isLocked {
-                HStack {
+                VStack {
+                    Spacer()
                     Button {
                         isLocked = true
                         coordinator.mask(show: true)
@@ -327,9 +326,10 @@ struct PlayerHostView: View {
                     }
                     .frame(width: 40, height: 40)
                     .background(.ultraThinMaterial, in: Capsule())
-                    .padding(.leading, 8)
+                    .padding(.trailing, 8)
                     Spacer()
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
     }
@@ -355,59 +355,26 @@ struct PlayerHostView: View {
         }
     }
 
-    /// Emby 专属菜单（媒体源 / 播放模式）
-    private var embyMenu: some View {
-        Menu {
-            if let info = playbackInfo, info.mediaSources.count > 1 {
-                Menu("媒体源") {
-                    ForEach(info.mediaSources) { ms in
-                        Button {
-                            currentMediaSource = ms
-                            reloadWithCurrentSource()
-                        } label: {
-                            if ms.id == currentMediaSource?.id {
-                                Label(ms.name ?? "源", systemImage: "checkmark")
-                            } else {
-                                Text(ms.name ?? ms.container ?? "源")
-                            }
-                        }
-                    }
-                }
-            }
-            Menu("播放模式") {
-                Picker("播放模式", selection: $playMode) {
-                    ForEach(PlayMode.allCases) { m in
-                        Text(m.rawValue).tag(m)
-                    }
-                }
-            }
-        } label: {
-            Image(systemName: "ellipsis.circle")
-                .font(.system(size: 20))
-                .foregroundStyle(.white)
-        }
-        .frame(width: 36, height: 36)
-        .background(.ultraThinMaterial, in: Capsule())
-    }
-
-    // MARK: - 单胶囊底栏：时间+控制+进度+菜单+时间 一行排列
+    // MARK: - 单胶囊底栏：时间+控制+进度+菜单 一行排列；所有按钮统一 36x36
 
     private func bottomBar(isLandscape: Bool) -> some View {
         HStack(spacing: 12) {
             Text(timeString(Int(coordinator.timemodel.currentTime)))
-                .font(.footnote.monospacedDigit())
+                .font(.caption.monospacedDigit())
                 .foregroundStyle(.white)
-                .frame(width: 40, alignment: .leading)
+                .frame(width: 34, alignment: .leading)
 
             // 快退 / 播放暂停 / 快进
-            HStack(spacing: 14) {
+            HStack(spacing: 10) {
                 Button {
                     coordinator.skip(interval: -15)
                 } label: {
                     Image(systemName: "gobackward.15")
-                        .font(.system(size: 20))
+                        .font(.system(size: 16))
                         .foregroundStyle(.white)
                 }
+                .frame(width: 36, height: 36)
+
                 Button {
                     if coordinator.state.isPlaying {
                         coordinator.playerLayer?.pause()
@@ -416,16 +383,19 @@ struct PlayerHostView: View {
                     }
                 } label: {
                     Image(systemName: coordinator.state.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 24, weight: .medium))
+                        .font(.system(size: 22, weight: .medium))
                         .foregroundStyle(.white)
                 }
+                .frame(width: 36, height: 36)
+
                 Button {
                     coordinator.skip(interval: 15)
                 } label: {
                     Image(systemName: "goforward.15")
-                        .font(.system(size: 20))
+                        .font(.system(size: 16))
                         .foregroundStyle(.white)
                 }
+                .frame(width: 36, height: 36)
             }
 
             // 进度条（接在播放按钮右边）
@@ -442,18 +412,18 @@ struct PlayerHostView: View {
                 }
             }
             .tint(.indigo)
-            .controlSize(.large)
+            .controlSize(.mini)
 
             Text(timeString(coordinator.timemodel.totalTime))
-                .font(.footnote.monospacedDigit())
+                .font(.caption.monospacedDigit())
                 .foregroundStyle(.white)
-                .frame(width: 40, alignment: .trailing)
+                .frame(width: 34, alignment: .trailing)
 
-            // 右侧功能按钮（等间距）
-            HStack(spacing: 14) {
+            // 右侧功能按钮（每个统一 36x36，HStack spacing: 10 保证间隔一致）
+            HStack(spacing: 10) {
+                scaleModeMenu
                 audioTrackMenu
                 subtitleMenu
-                scaleModeMenu
                 playbackRateMenu
                 Button {
                     if isLandscape {
@@ -463,13 +433,14 @@ struct PlayerHostView: View {
                     }
                 } label: {
                     Image(systemName: isLandscape ? "rectangle.portrait.rotate" : "rectangle.landscape.rotate")
-                        .font(.system(size: 18))
+                        .font(.system(size: 16))
                         .foregroundStyle(.white)
                 }
+                .frame(width: 36, height: 36)
             }
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.vertical, 8)
         .background(.ultraThinMaterial, in: Capsule())
         .padding(.horizontal, 16)
         .padding(.bottom, isLandscape ? 18 : 12)
@@ -491,12 +462,13 @@ struct PlayerHostView: View {
             }
         } label: {
             Image(systemName: "aspect.ratio")
-                .font(.system(size: 22))
+                .font(.system(size: 16))
                 .foregroundStyle(.white)
         }
+        .frame(width: 36, height: 36)
     }
 
-    /// 音轨选择
+    /// 音轨选择（按当前选中 track 勾选，而非 isEnabled 全部勾选）
     @ViewBuilder
     private var audioTrackMenu: some View {
         if let tracks = coordinator.playerLayer?.player.tracks(mediaType: .audio), !tracks.isEmpty {
@@ -514,13 +486,14 @@ struct PlayerHostView: View {
                 }
             } label: {
                 Image(systemName: "waveform")
-                    .font(.system(size: 22))
+                    .font(.system(size: 16))
                     .foregroundStyle(.white)
             }
+            .frame(width: 36, height: 36)
         }
     }
 
-    /// 字幕选择（内嵌字幕 + 外挂字幕）
+    /// 字幕选择（内嵌字幕 + 外挂字幕；按当前 selectedSubtitleInfo 身份匹配勾选）
     private var subtitleMenu: some View {
         Menu {
             Button {
@@ -536,7 +509,7 @@ struct PlayerHostView: View {
                 Button {
                     coordinator.subtitleModel.selectedSubtitleInfo = info
                 } label: {
-                    if info.isEnabled {
+                    if coordinator.subtitleModel.selectedSubtitleInfo?.id == info.id {
                         Label(info.name, systemImage: "checkmark")
                     } else {
                         Text(info.name)
@@ -545,9 +518,10 @@ struct PlayerHostView: View {
             }
         } label: {
             Image(systemName: "captions.bubble")
-                .font(.system(size: 22))
+                .font(.system(size: 16))
                 .foregroundStyle(.white)
         }
+        .frame(width: 36, height: 36)
     }
 
     /// 倍速选择
@@ -566,9 +540,10 @@ struct PlayerHostView: View {
             }
         } label: {
             Image(systemName: "speedometer")
-                .font(.system(size: 22))
+                .font(.system(size: 16))
                 .foregroundStyle(.white)
         }
+        .frame(width: 36, height: 36)
     }
 
     private func rateLabel(_ rate: Float) -> String {

@@ -36,10 +36,12 @@ public final class PlaybackReporter: ObservableObject {
         
         isRunning = true
         
+        // 服务器可能返回空 MediaSourceId，fallback 到 item.id（Emby 服务端允许）
+        let effectiveMSId = mediaSource.id.isEmpty ? item.id : mediaSource.id
         do {
             try await EmbyClient.shared.reportPlaybackStart(
                 itemId: item.id,
-                mediaSourceId: mediaSource.id,
+                mediaSourceId: effectiveMSId,
                 playSessionId: playSessionId,
                 playbackStartTimeTicks: startPositionTicks
             )
@@ -73,6 +75,7 @@ public final class PlaybackReporter: ObservableObject {
         }
         let pos = lastPositionTicks
         let sid = playSessionId
+        let msId = src.id.isEmpty ? item.id : src.id
         
         isRunning = false
         currentItem = nil
@@ -83,7 +86,7 @@ public final class PlaybackReporter: ObservableObject {
             do {
                 try await EmbyClient.shared.reportPlaybackStop(
                     itemId: item.id,
-                    mediaSourceId: src.id,
+                    mediaSourceId: msId,
                     playSessionId: sid,
                     positionTicks: pos,
                     playedToCompletion: playedToCompletion
@@ -105,10 +108,12 @@ public final class PlaybackReporter: ObservableObject {
             let msId = await self.currentMediaSource?.id
             let psId = await self.playSessionId
             guard let i = itemId, let m = msId else { return }
+            // MediaSourceId 为空时 fallback 到 item.id
+            let effectiveMsId = m.isEmpty ? i : m
             do {
                 try await EmbyClient.shared.reportPlaybackProgress(
                     itemId: i,
-                    mediaSourceId: m,
+                    mediaSourceId: effectiveMsId,
                     playSessionId: psId,
                     positionTicks: pos,
                     isPaused: isPaused
@@ -124,10 +129,11 @@ public final class PlaybackReporter: ObservableObject {
         let now = Date()
         guard now.timeIntervalSince(lastReportedDate) >= 9.0 else { return }
         lastReportedDate = now
+        let msId = src.id.isEmpty ? item.id : src.id
         do {
             try await EmbyClient.shared.reportPlaybackProgress(
                 itemId: item.id,
-                mediaSourceId: src.id,
+                mediaSourceId: msId,
                 playSessionId: playSessionId,
                 positionTicks: lastPositionTicks
             )

@@ -1,26 +1,32 @@
 import SwiftUI
+import AVFoundation
 import EMPlayerCore
 import KSPlayer
 
 // MARK: - Player Host
 //
-// 播放层直接使用 KSPlayer 官方提供的 SwiftUI 视图 `KSVideoPlayerView`
-// （自带播放/暂停/进度条/手势/倍速/字幕/画中画/全屏等完整播放 UI），
-// 并通过 `KSVideoPlayer.Coordinator` 的官方回调把播放进度/状态/结束事件
+// 播放层使用 KSPlayer 底层的 `KSVideoPlayer`（纯视频渲染视图，无自带控制层），
+// 控制层（顶部返回/标题/菜单 + 底部进度条/倍速/音轨/字幕）完全自定义实现，
+// 通过 `KSVideoPlayer.Coordinator` 的官方回调把播放进度/状态/结束事件
 // 桥接到 Emby 的 PlaybackReporter 进行播放上报。
 //
+// 方向控制：进入播放页强制横屏（OrientationManager + AppDelegate），
+// 竖屏时视频保持 16:9 半屏显示、下方展示标题与选集。
+//
 // 官方 API（已核对 KSPlayer main 分支源码）：
-//   KSVideoPlayerView(coordinator:url:options:title:)   // iOS 16+
+//   KSVideoPlayer(coordinator:url:options:)            // 纯渲染 UIViewRepresentable
 //   KSVideoPlayer.Coordinator (ObservableObject)
 //     .onPlay        : (TimeInterval, TimeInterval) -> Void   // 当前时间 / 总时长
 //     .onStateChanged: (KSPlayerLayer, KSPlayerState) -> Void
 //     .onFinish      : (KSPlayerLayer, Error?) -> Void         // error 非 nil 表示出错
-//     .seek(time:) / .playerLayer?.play() / .pause()
+//     .seek(time:) / .skip(interval:) / .mask(show:autoHide:)
+//     .isMaskShow / .state.isPlaying / .timemodel (currentTime/totalTime, Int 秒)
+//     .playbackRate / .playerLayer?.play() / .pause()
+//     .playerLayer?.player.tracks(mediaType:) / .select(track:)   // 音轨
+//     .subtitleModel.subtitleInfos / .selectedSubtitleInfo          // 字幕
 //   KSPlayerState: .initialized/.preparing/.readyToPlay/
 //                  .buffering/.bufferFinished/.paused/
 //                  .playedToTheEnd/.error （.error 无关联值）
-//   KSOptions: hardwareDecode / startPlayTime / userAgent /
-//              avOptions[AVURLAssetHTTPHeaderFieldsKey] / isSecondOpen ...
 
 struct PlayerHostView: View {
     @Environment(\.dismiss) private var dismiss
@@ -46,6 +52,10 @@ struct PlayerHostView: View {
     @State private var bannerMsg: String?        // 非致命错误（顶部横幅）
     @State private var fatalMsg: String?         // 无法播放（整页占位）
 
+    // 进度条拖动状态（拖动中不被播放进度回调覆盖）
+    @State private var isSeeking: Bool = false
+    @State private var seekValue: Double = 0
+
     // 上报 / 重建控制
     @State private var reporterActive: Bool = false
     @State private var finishedCurrent: Bool = false
@@ -61,6 +71,8 @@ struct PlayerHostView: View {
         var id: String { rawValue }
     }
 
+    private let playbackRates: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+
     init(context: ItemDetailView.PlayerContext) {
         self.context = context
         _item = State(initialValue: context.item)
@@ -71,60 +83,40 @@ struct PlayerHostView: View {
     }
 
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
+        GeometryReader { geo in
+            let isLandscape = geo.size.width > geo.size.height
+            ZStack(alignment: .top) {
+                Color.black.ignoresSafeArea()
 
-            if isLoading {
-                loadingView
-            } else if let url = playbackURL {
-                KSVideoPlayerView(
-                    coordinator: coordinator,
-                    url: url,
-                    options: options,
-                    title: item.name
-                )
-                .id(configureToken)
-                .ignoresSafeArea()
-                .onAppear { installPlayer() }
-                .overlay(alignment: .top) {
-                    if let bannerMsg {
-                        Text(bannerMsg)
-                            .font(.caption)
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(.red.opacity(0.85), in: Capsule())
-                            .padding(.top, 58)
+                if isLoading {
+                    loadingView
+                } else if let url = playbackURL {
+                    VStack(spacing: 0) {
+                        // 横屏：视频铺满；竖屏：视频保持 16:9 半屏置顶
+                        videoArea(url: url)
+                            .frame(height: isLandscape ? geo.size.height : geo.size.width * 9.0 / 16.0)
+                            .clipped()
+
+                        if !isLandscape {
+                            portraitInfoView
+                        }
                     }
-                }
-                .overlay(alignment: .topLeading) {
-                    // Emby 专属菜单（媒体源 / 播放模式 / 播放列表），
-                    // 跟随 KSPlayer 控制栏一起显隐，避开左上角自带的关闭按钮。
-                    topTrailingMenu
-                        .opacity(coordinator.isMaskShow ? 1 : 0)
-                        .padding(.top, 6)
-                        .padding(.leading, 54)
-                }
-            } else {
-                ContentUnavailableView(
-                    "无法播放",
-                    systemImage: "play.slash.fill",
-                    description: Text(fatalMsg ?? "没有可用的播放源")
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .overlay(alignment: .topLeading) {
-                    Button { dismiss() } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.title3)
-                            .foregroundStyle(.white)
-                            .padding()
-                    }
+                } else {
+                    fatalView
                 }
             }
         }
         .preferredColorScheme(.dark)
         .statusBarHidden(true)
+        .background(Color.black.ignoresSafeArea())
         .task(id: item.id, priority: .high) { await resolvePlayback() }
+        .onAppear {
+            OrientationManager.shared.lockLandscape()
+        }
+        .onDisappear {
+            OrientationManager.shared.lockPortrait()
+            teardownReporter(playedToCompletion: guessPlayedToCompletion())
+        }
         .onChange(of: currentIndex) { _, idx in
             guard idx >= 0 && idx < playlist.count else { return }
             let next = playlist[idx]
@@ -135,35 +127,84 @@ struct PlayerHostView: View {
         .onChange(of: playMode) { _, _ in
             reloadWithCurrentSource()
         }
-        .onDisappear {
-            teardownReporter(playedToCompletion: guessPlayedToCompletion())
-        }
     }
 
-    // MARK: - Loading
+    // MARK: - 视频区域（渲染 + 手势 + 控件层）
 
-    private var loadingView: some View {
+    private func videoArea(url: URL) -> some View {
         ZStack {
-            Color.black.ignoresSafeArea()
-            VStack(spacing: 16) {
-                ProgressView().controlSize(.large).tint(.white)
-                Text("正在准备播放…").font(.headline).foregroundStyle(.white)
-                Text(item.name).font(.subheadline).foregroundStyle(.secondary)
+            KSVideoPlayer(coordinator: coordinator, url: url, options: options)
+                .id(configureToken)
+                .onAppear { installPlayer() }
+
+            // 控制层：跟随 coordinator.isMaskShow 显隐（播放中自动隐藏）
+            controlsOverlay
+                .opacity(coordinator.isMaskShow ? 1 : 0)
+
+            if let bannerMsg {
+                Text(bannerMsg)
+                    .font(.caption)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(.red.opacity(0.85), in: Capsule())
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 52)
             }
-            .overlay(alignment: .topLeading) {
-                Button { dismiss() } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.title3)
-                        .foregroundStyle(.white)
-                        .padding()
-                }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) {
+            // 双击：播放 / 暂停
+            if coordinator.state.isPlaying {
+                coordinator.playerLayer?.pause()
+            } else {
+                coordinator.playerLayer?.play()
             }
+        }
+        .onTapGesture {
+            // 单击：显隐控制层（播放中自动倒计时隐藏）
+            coordinator.mask(show: !coordinator.isMaskShow)
         }
     }
 
-    // MARK: - Emby 专属菜单
+    // MARK: - 控制层
 
-    private var topTrailingMenu: some View {
+    private var controlsOverlay: some View {
+        VStack(spacing: 0) {
+            topBar
+            Spacer()
+            bottomBar
+        }
+    }
+
+    private var topBar: some View {
+        HStack(spacing: 12) {
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .background(.black.opacity(0.35), in: Circle())
+            }
+            Text(item.name)
+                .font(.headline)
+                .foregroundStyle(.white)
+                .lineLimit(1)
+            Spacer()
+            embyMenu
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            LinearGradient(colors: [.black.opacity(0.55), .clear], startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea(edges: .top)
+        )
+    }
+
+    /// Emby 专属菜单（媒体源 / 播放模式）
+    private var embyMenu: some View {
         Menu {
             if let info = playbackInfo, info.mediaSources.count > 1 {
                 Menu("媒体源") {
@@ -188,34 +229,268 @@ struct PlayerHostView: View {
                     }
                 }
             }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(.system(size: 22))
+                .foregroundStyle(.white)
+                .frame(width: 36, height: 36)
+                .background(.black.opacity(0.35), in: Circle())
+        }
+    }
+
+    private var bottomBar: some View {
+        VStack(spacing: 4) {
+            // 进度条 + 时间
+            HStack(spacing: 10) {
+                Text(timeString(Int(coordinator.timemodel.currentTime)))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.white)
+                Slider(
+                    value: Binding(
+                        get: { isSeeking ? seekValue : Double(coordinator.timemodel.currentTime) },
+                        set: { seekValue = $0 }
+                    ),
+                    in: 0...max(1, Double(coordinator.timemodel.totalTime))
+                ) { editing in
+                    isSeeking = editing
+                    if !editing {
+                        coordinator.seek(time: seekValue)
+                    }
+                }
+                .tint(.indigo)
+                Text(timeString(coordinator.timemodel.totalTime))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.white)
+            }
+
+            // 按钮行
+            HStack(spacing: 20) {
+                // 播放 / 暂停
+                Button {
+                    if coordinator.state.isPlaying {
+                        coordinator.playerLayer?.pause()
+                    } else {
+                        coordinator.playerLayer?.play()
+                    }
+                } label: {
+                    Image(systemName: coordinator.state.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 20))
+                        .foregroundStyle(.white)
+                }
+
+                // 快退 / 快进 15 秒
+                Button {
+                    coordinator.skip(interval: -15)
+                } label: {
+                    Image(systemName: "gobackward.15")
+                        .font(.system(size: 18))
+                        .foregroundStyle(.white)
+                }
+                Button {
+                    coordinator.skip(interval: 15)
+                } label: {
+                    Image(systemName: "goforward.15")
+                        .font(.system(size: 18))
+                        .foregroundStyle(.white)
+                }
+
+                Spacer()
+
+                audioTrackMenu
+                subtitleMenu
+                playbackRateMenu
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.bottom, 10)
+        .padding(.top, 24)
+        .background(
+            LinearGradient(colors: [.clear, .black.opacity(0.55)], startPoint: .top, endPoint: .bottom)
+        )
+    }
+
+    /// 音轨选择
+    @ViewBuilder
+    private var audioTrackMenu: some View {
+        if let tracks = coordinator.playerLayer?.player.tracks(mediaType: .audio), !tracks.isEmpty {
+            Menu {
+                ForEach(tracks, id: \.trackID) { track in
+                    Button {
+                        coordinator.playerLayer?.player.select(track: track)
+                    } label: {
+                        if track.isEnabled {
+                            Label(track.name, systemImage: "checkmark")
+                        } else {
+                            Text(track.name)
+                        }
+                    }
+                }
+            } label: {
+                Image(systemName: "waveform")
+                    .font(.system(size: 18))
+                    .foregroundStyle(.white)
+            }
+        }
+    }
+
+    /// 字幕选择（内嵌字幕 + 外挂字幕）
+    private var subtitleMenu: some View {
+        Menu {
+            Button {
+                coordinator.subtitleModel.selectedSubtitleInfo = nil
+            } label: {
+                if coordinator.subtitleModel.selectedSubtitleInfo == nil {
+                    Label("关闭字幕", systemImage: "checkmark")
+                } else {
+                    Text("关闭字幕")
+                }
+            }
+            ForEach(coordinator.subtitleModel.subtitleInfos, id: \.id) { info in
+                Button {
+                    coordinator.subtitleModel.selectedSubtitleInfo = info
+                } label: {
+                    if info.isEnabled {
+                        Label(info.name, systemImage: "checkmark")
+                    } else {
+                        Text(info.name)
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "captions.bubble")
+                .font(.system(size: 18))
+                .foregroundStyle(.white)
+        }
+    }
+
+    /// 倍速选择
+    private var playbackRateMenu: some View {
+        Menu {
+            ForEach(playbackRates, id: \.self) { rate in
+                Button {
+                    coordinator.playbackRate = rate
+                } label: {
+                    if abs(coordinator.playbackRate - rate) < 0.01 {
+                        Label(rateLabel(rate), systemImage: "checkmark")
+                    } else {
+                        Text(rateLabel(rate))
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "speedometer")
+                .font(.system(size: 18))
+                .foregroundStyle(.white)
+        }
+    }
+
+    private func rateLabel(_ rate: Float) -> String {
+        rate == rate.rounded() ? String(format: "%.0fx", rate) : String(format: "%.2gx", rate)
+    }
+
+    // MARK: - 竖屏下方信息区（半屏播放）
+
+    private var portraitInfoView: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(item.name)
+                .font(.title3.bold())
+                .foregroundStyle(.primary)
+                .lineLimit(2)
+
+            HStack(spacing: 10) {
+                if let s = item.parentIndexNumber, let e = item.indexNumber {
+                    Text(String(format: "S%02d · E%02d", s, e))
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.indigo)
+                }
+                Text(item.durationString)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
             if playlist.count > 1 {
-                Menu("播放列表") {
-                    ForEach(Array(playlist.enumerated()), id: \.offset) { idx, it in
-                        Button {
-                            currentIndex = idx
-                        } label: {
-                            if idx == currentIndex {
-                                Label(episodeLabel(it, idx: idx), systemImage: "checkmark")
-                            } else {
-                                Text(episodeLabel(it, idx: idx))
+                Text("选集")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(Array(playlist.enumerated()), id: \.offset) { idx, ep in
+                            Button {
+                                currentIndex = idx
+                            } label: {
+                                Text(episodeLabel(ep, idx: idx))
+                                    .font(.caption)
+                                    .lineLimit(1)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 8)
+                                    .background(
+                                        Capsule().fill(idx == currentIndex ? Color.indigo : Color(UIColor.tertiarySystemFill))
+                                    )
+                                    .foregroundStyle(idx == currentIndex ? .white : .primary)
                             }
                         }
                     }
                 }
             }
-        } label: {
-            Image(systemName: "ellipsis.circle.fill")
-                .font(.system(size: 30))
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(.white)
+
+            Spacer()
         }
+        .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(.systemBackground))
     }
 
     private func episodeLabel(_ it: MediaItem, idx: Int) -> String {
         if let s = it.parentIndexNumber, let e = it.indexNumber {
-            return String(format: "S%02dE%02d %@", s, e, it.name)
+            return String(format: "S%02dE%02d", s, e)
         }
-        return "\(idx + 1). \(it.name)"
+        return "\(idx + 1)"
+    }
+
+    // MARK: - Loading / Fatal
+
+    private var loadingView: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            VStack(spacing: 16) {
+                ProgressView().controlSize(.large).tint(.white)
+                Text("正在准备播放…").font(.headline).foregroundStyle(.white)
+                Text(item.name).font(.subheadline).foregroundStyle(.secondary)
+            }
+            .overlay(alignment: .topLeading) {
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(.white)
+                        .padding()
+                }
+            }
+        }
+    }
+
+    private var fatalView: some View {
+        ContentUnavailableView(
+            "无法播放",
+            systemImage: "play.slash.fill",
+            description: Text(fatalMsg ?? "没有可用的播放源")
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay(alignment: .topLeading) {
+            Button { dismiss() } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.title3)
+                    .foregroundStyle(.white)
+                    .padding()
+            }
+        }
+    }
+
+    // MARK: - 时间格式化（秒）
+
+    private func timeString(_ t: Int) -> String {
+        let s = max(0, t)
+        let h = s / 3600, m = (s % 3600) / 60, sec = s % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, sec) : String(format: "%d:%02d", m, sec)
     }
 
     // MARK: - 解析播放地址
@@ -309,7 +584,7 @@ struct PlayerHostView: View {
         }
     }
 
-    /// 切换媒体源 / 播放模式后重建播放器（.id 变化触发 KSVideoPlayerView 重建，
+    /// 切换媒体源 / 播放模式后重建播放器（.id 变化触发重建，
     /// 其 onAppear 会重新挂载回调并启动上报）。
     private func reloadWithCurrentSource() {
         teardownReporter(playedToCompletion: false)

@@ -30,16 +30,15 @@ struct MainTabView: View {
     }
 }
 
-// MARK: - Home (Continue Watching + Next Up + Recently Added)
+// MARK: - Home (Continue Watching + Server Views Categories)
 
 struct HomeView: View {
     @EnvironmentObject var appState: AppState
     @State private var resume: [MediaItem] = []
-    @State private var nextUp: [MediaItem] = []
-    @State private var recent: [MediaItem] = []
+    @State private var sections: [(folder: MediaFolder, items: [MediaItem])] = []
     @State private var loading: Bool = true
     @State private var loadTask: Task<Void, Never>?
-    
+
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -48,29 +47,27 @@ struct HomeView: View {
                         .frame(maxWidth: .infinity, minHeight: 400)
                 } else {
                     LazyVStack(alignment: .leading, spacing: 24, pinnedViews: [.sectionHeaders]) {
+                        // 继续观看
                         Section {
-                            PosterRow(items: resume, useBackdrop: false) { item in
+                            PosterRow(items: resume) { item in
                                 ResumeCard(item: item)
                             } emptyView: {
                                 EmptyHint(label: "还没有继续观看的内容", systemImage: "play.circle")
                             }
                         } header: { SectionHeader(title: "继续观看", systemImage: "play.circle.fill") }
-                        
-                        Section {
-                            PosterRow(items: nextUp, useBackdrop: false) { item in
-                                NextUpCard(item: item)
-                            } emptyView: {
-                                EmptyHint(label: "没有待看的剧集", systemImage: "tv")
+
+                        // 各服务器媒体库分类
+                        ForEach(Array(sections.enumerated()), id: \.offset) { idx, section in
+                            Section {
+                                PosterRow(items: section.items) { item in
+                                    PosterCard(item: item)
+                                } emptyView: {
+                                    EmptyHint(label: "暂无内容", systemImage: "film.stack")
+                                }
+                            } header: {
+                                SectionHeader(title: section.folder.collectionName, systemImage: section.folder.sfSymbol)
                             }
-                        } header: { SectionHeader(title: "下一集", systemImage: "forward.end.fill") }
-                        
-                        Section {
-                            PosterRow(items: recent, useBackdrop: true, wide: true) { item in
-                                BackdropCard(item: item)
-                            } emptyView: {
-                                EmptyHint(label: "暂无最近添加内容", systemImage: "sparkles")
-                            }
-                        } header: { SectionHeader(title: "最近添加", systemImage: "sparkles") }
+                        }
                     }
                     .padding(.bottom, 20)
                 }
@@ -78,41 +75,66 @@ struct HomeView: View {
             .navigationTitle("首页")
             .refreshable { await load() }
             .onAppear {
-                if !loading && resume.isEmpty && nextUp.isEmpty && recent.isEmpty {
+                if !loading && resume.isEmpty && sections.isEmpty {
                     Task { await load() }
                 }
             }
             .task { await load() }
         }
     }
-    
+
     private func load() async {
         loadTask?.cancel()
         loading = true
         let task = Task {
             do {
-                // 三个区块独立加载：单个接口失败只让对应区块显示空态，不再拖垮整个首页
+                // 1. 加载继续观看（独立容错）
                 async let r1: QueryResult<MediaItem>? = loadSection {
                     try await EmbyClient.shared.getResumeItems(limit: 20)
                 }
-                async let r2: QueryResult<MediaItem>? = loadSection {
-                    try await EmbyClient.shared.getNextUp(limit: 20)
+
+                // 2. 加载服务器 Views（媒体库分类）
+                let folders: [MediaFolder]
+                do {
+                    folders = try await EmbyClient.shared.getMediaFolders()
+                } catch {
+                    if Task.isCancelled { return }
+                    folders = []
+                    await MainActor.run {
+                        appState.handleError(error, fallback: "加载媒体库分类失败")
+                    }
                 }
-                async let r3: QueryResult<MediaItem>? = loadSection {
-                    try await EmbyClient.shared.getItems(
-                        sortBy: ["DateCreated"],
-                        sortOrder: "Descending",
-                        recursive: true,
-                        includeItemTypes: ["Movie","Series","MusicAlbum","Season","Episode","MusicVideo"],
-                        limit: 20
-                    )
+
+                // 3. 并发加载每个 View 的最新内容
+                let folderResults = await withTaskGroup(of: (MediaFolder, [MediaItem]).self) { group in
+                    for folder in folders {
+                        group.addTask { [folder] in
+                            do {
+                                let result = try await EmbyClient.shared.getItems(
+                                    parentId: folder.id,
+                                    sortBy: ["DateCreated"],
+                                    sortOrder: "Descending",
+                                    recursive: true,
+                                    limit: 20
+                                )
+                                return (folder, result.items)
+                            } catch {
+                                return (folder, [])
+                            }
+                        }
+                    }
+                    var results: [(MediaFolder, [MediaItem])] = []
+                    for await (folder, items) in group {
+                        results.append((folder, items))
+                    }
+                    return results
                 }
-                let (a, b, c) = await (r1, r2, r3)
+
                 try Task.checkCancellation()
+                let resumeResult = await r1
                 await MainActor.run {
-                    resume = a?.items ?? []
-                    nextUp = b?.items ?? []
-                    recent = c?.items ?? []
+                    resume = resumeResult?.items ?? []
+                    sections = folderResults.filter { !$0.items.isEmpty }
                     loading = false
                 }
             } catch is CancellationError {
@@ -288,45 +310,6 @@ struct ResumeCard: View {
                 .lineLimit(1)
         }
         .frame(width: size.width)
-    }
-}
-
-struct NextUpCard: View {
-    let item: MediaItem
-    private let size: CGSize = CGSize(width: 280, height: 100)
-    
-    var body: some View {
-        HStack(spacing: 10) {
-            KFPosterImage(url: EmbyClient.shared.thumbImageURL(for: item, maxWidth: 400), size: CGSize(width: 160, height: 90), placeholder: .backdrop, contentMode: .fill)
-                .frame(width: 160, height: 90)
-                .clipped()
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            
-            VStack(alignment: .leading, spacing: 4) {
-                if let series = item.seriesName {
-                    Text(series)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                Text(item.name)
-                    .font(.callout.weight(.semibold))
-                    .lineLimit(2)
-                if let s = item.parentIndexNumber, let e = item.indexNumber {
-                    Text(String(format: "S%02d · E%02d", s, e))
-                        .font(.caption2)
-                        .foregroundStyle(.indigo)
-                } else {
-                    Text(item.durationString)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Spacer()
-        }
-        .frame(width: size.width)
-        .padding(8)
-        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.quaternary.opacity(0.4)))
     }
 }
 

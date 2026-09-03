@@ -462,7 +462,8 @@ extension EmbyClient {
         guard let uid = currentUser?.id else { throw EmbyAPIError.unauthorized }
         let result: QueryResult<MediaFolder> = try await request(
             method: "GET",
-            path: "/emby/Users/\(uid)/Views"
+            path: "/emby/Users/\(uid)/Views",
+            queryItems: [URLQueryItem(name: "Fields", value: "ImageTags")]
         )
         return result.items
     }
@@ -737,9 +738,11 @@ extension EmbyClient {
     
     public func imageURL(itemId: String, tag: String?, type: String = "Primary", width: Int? = nil, height: Int? = nil, maxWidth: Int? = nil, fillWidth: Bool = false) -> URL? {
         guard let server = currentServer else { return nil }
-        guard let tag = tag, !tag.isEmpty else { return nil }
+        guard let itemId = Optional(itemId), !itemId.isEmpty else { return nil }
         let base = server.baseURL()
-        let path = "/emby/Items/\(itemId)/Images/\(type)/\(tag)"
+        // tag 可选：有 tag 时走缓存路径，无 tag 时仍可请求（Emby 返回当前图片）
+        var path = "/emby/Items/\(itemId)/Images/\(type)"
+        if let tag = tag, !tag.isEmpty { path += "/\(tag)" }
         var queryParts: [String] = []
         if let w = width { queryParts.append("Width=\(w)") }
         if let h = height { queryParts.append("Height=\(h)") }
@@ -763,9 +766,13 @@ extension EmbyClient {
     
     public func backdropURL(for item: MediaItem, index: Int = 0, maxWidth: Int = 1920) -> URL? {
         let tags = item.backdropImageTags ?? []
-        guard index < tags.count else { return nil }
-        let tag = tags[index]
-        return imageURL(itemId: item.id, tag: tag, type: "Backdrop", maxWidth: maxWidth)
+        if index < tags.count {
+            let tag = tags[index]
+            return imageURL(itemId: item.id, tag: tag, type: "Backdrop", maxWidth: maxWidth)
+        }
+        // 无 backdrop tag 时回退到无 tag 请求或 Primary
+        return imageURL(itemId: item.id, tag: nil, type: "Backdrop", maxWidth: maxWidth)
+            ?? primaryImageURL(for: item, maxWidth: maxWidth)
     }
     
     public func logoImageURL(for item: MediaItem) -> URL? {

@@ -42,16 +42,8 @@ struct EMPlayerApp: App {
         UINavigationBar.appearance().tintColor = .systemIndigo
 
         // 图片加载同样支持「跳过 SSL 验证」（自签名 HTTPS 服务器的封面图）
+        // 图片鉴权通过 URL 的 api_key 参数（imageURL 生成时已拼接）
         KingfisherManager.shared.downloader.authenticationChallengeResponder = Self.imageChallenge
-
-        // Kingfisher 请求注入 Emby 鉴权头（部分服务器仅认 header 不认 query param）
-        KingfisherManager.shared.downloader.requestModifier = AnyModifier { request in
-            var req = request
-            if let token = EmbyClient.shared.accessToken, !token.isEmpty {
-                req.setValue("MediaBrowser Token=\"\(token)\"", forHTTPHeaderField: "X-Emby-Authorization")
-            }
-            return req
-        }
 
         // Background audio category (even when app is in background)
         do {

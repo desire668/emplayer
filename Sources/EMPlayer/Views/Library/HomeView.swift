@@ -106,7 +106,7 @@ struct HomeView: View {
                 }
 
                 // 3. 并发加载每个 View 的最新内容
-                let folderResults = await withTaskGroup(of: (MediaFolder, [MediaItem]).self) { group in
+                let folderResults = await withTaskGroup(of: (folder: MediaFolder, items: [MediaItem]).self) { group in
                     for folder in folders {
                         group.addTask { [folder] in
                             do {
@@ -117,15 +117,15 @@ struct HomeView: View {
                                     recursive: true,
                                     limit: 20
                                 )
-                                return (folder, result.items)
+                                return (folder: folder, items: result.items)
                             } catch {
-                                return (folder, [])
+                                return (folder: folder, items: [])
                             }
                         }
                     }
-                    var results: [(MediaFolder, [MediaItem])] = []
+                    var results: [(folder: MediaFolder, items: [MediaItem])] = []
                     for await (folder, items) in group {
-                        results.append((folder, items))
+                        results.append((folder: folder, items: items))
                     }
                     return results
                 }

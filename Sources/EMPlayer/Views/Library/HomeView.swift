@@ -91,24 +91,32 @@ struct HomeView: View {
         loading = true
         let task = Task {
             do {
-                async let r1 = EmbyClient.shared.getResumeItems(limit: 20)
-                async let r2 = EmbyClient.shared.getNextUp(limit: 20)
-                async let r3 = EmbyClient.shared.getItems(
-                    sortBy: ["DateCreated"],
-                    sortOrder: "Descending",
-                    recursive: true,
-                    includeItemTypes: ["Movie","Series","MusicAlbum","Season","Episode","MusicVideo"],
-                    limit: 20
-                )
-                let (a, b, c) = try await (r1, r2, r3)
+                // 三个区块独立加载：单个接口失败只让对应区块显示空态，不再拖垮整个首页
+                async let r1: QueryResult<MediaItem>? = loadSection {
+                    try await EmbyClient.shared.getResumeItems(limit: 20)
+                }
+                async let r2: QueryResult<MediaItem>? = loadSection {
+                    try await EmbyClient.shared.getNextUp(limit: 20)
+                }
+                async let r3: QueryResult<MediaItem>? = loadSection {
+                    try await EmbyClient.shared.getItems(
+                        sortBy: ["DateCreated"],
+                        sortOrder: "Descending",
+                        recursive: true,
+                        includeItemTypes: ["Movie","Series","MusicAlbum","Season","Episode","MusicVideo"],
+                        limit: 20
+                    )
+                }
+                let (a, b, c) = await (r1, r2, r3)
                 try Task.checkCancellation()
                 await MainActor.run {
-                    resume = a.items
-                    nextUp = b.items
-                    recent = c.items
+                    resume = a?.items ?? []
+                    nextUp = b?.items ?? []
+                    recent = c?.items ?? []
                     loading = false
                 }
             } catch is CancellationError {
+                // 被下拉刷新 / 新任务取消，静默处理
             } catch {
                 await MainActor.run {
                     appState.handleError(error, fallback: "加载首页失败")
@@ -117,6 +125,19 @@ struct HomeView: View {
             }
         }
         loadTask = task
+    }
+
+    /// 单个首页区块的容错加载：失败时弹出错误横幅并返回 nil（区块显示空态），不影响其他区块
+    private func loadSection(_ work: () async throws -> QueryResult<MediaItem>) async -> QueryResult<MediaItem>? {
+        do {
+            return try await work()
+        } catch {
+            if Task.isCancelled { return nil }
+            await MainActor.run {
+                appState.handleError(error, fallback: "加载首页部分内容失败")
+            }
+            return nil
+        }
     }
 }
 

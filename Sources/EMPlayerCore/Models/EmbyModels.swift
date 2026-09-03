@@ -1,5 +1,104 @@
 import Foundation
 
+// MARK: - Lenient Decoding Helpers
+
+// Emby（ServiceStack.Text）与 Jellyfin（System.Text.Json）序列化行为不同：
+// null/默认值字段可能被省略，部分字段类型在不同版本间也有差异
+// （如 MediaStream.NalLengthSize 是字符串、可空布尔会返回 null、枚举偶尔以数字返回）。
+// 以下容错解码保证「单个字段异常不会导致整个响应解码失败」，避免首页整屏报错。
+
+struct AnyCodingKey: CodingKey {
+    var stringValue: String
+    var intValue: Int? { nil }
+    init?(stringValue: String) { self.stringValue = stringValue }
+    init?(intValue: Int) { self.stringValue = String(intValue) }
+}
+
+extension KeyedDecodingContainer {
+    /// 字符串：字段缺失 / null / 类型不符均返回 nil；数字与布尔会被转成字符串
+    func lenientString(forKey key: Key) -> String? {
+        if let s = try? decodeIfPresent(String.self, forKey: key), let s { return s }
+        if let n = try? decodeIfPresent(Int64.self, forKey: key), let n { return String(n) }
+        if let d = try? decodeIfPresent(Double.self, forKey: key), let d { return String(d) }
+        if let b = try? decodeIfPresent(Bool.self, forKey: key), let b { return String(b) }
+        return nil
+    }
+
+    /// 布尔：兼容 0/1 数字与 "true"/"false" 字符串；缺失或 null 返回 default
+    func lenientBool(forKey key: Key, default def: Bool = false) -> Bool {
+        if let b = try? decodeIfPresent(Bool.self, forKey: key), let b { return b }
+        if let n = try? decodeIfPresent(Int.self, forKey: key), let n { return n != 0 }
+        if let s = try? decodeIfPresent(String.self, forKey: key), let s {
+            switch s.lowercased() {
+            case "true", "1": return true
+            case "false", "0": return false
+            default: return def
+            }
+        }
+        return def
+    }
+
+    /// Int：兼容数字字符串
+    func lenientInt(forKey key: Key) -> Int? {
+        if let n = try? decodeIfPresent(Int.self, forKey: key), let n { return n }
+        if let d = try? decodeIfPresent(Double.self, forKey: key), let d { return Int(d) }
+        if let s = try? decodeIfPresent(String.self, forKey: key), let s { return Int(s) }
+        return nil
+    }
+
+    /// Int64：兼容数字字符串（ticks / size 等大数值）
+    func lenientInt64(forKey key: Key) -> Int64? {
+        if let n = try? decodeIfPresent(Int64.self, forKey: key), let n { return n }
+        if let d = try? decodeIfPresent(Double.self, forKey: key), let d { return Int64(d) }
+        if let s = try? decodeIfPresent(String.self, forKey: key), let s { return Int64(s) }
+        return nil
+    }
+
+    /// Double：兼容数字字符串
+    func lenientDouble(forKey key: Key) -> Double? {
+        if let d = try? decodeIfPresent(Double.self, forKey: key), let d { return d }
+        if let s = try? decodeIfPresent(String.self, forKey: key), let s { return Double(s) }
+        return nil
+    }
+
+    /// 枚举字段：正常返回字符串名；个别版本/场景返回数字时按 numericMapping 转换
+    func lenientEnumName(forKey key: Key, numericMapping: [Int: String]) -> String? {
+        if let s = try? decodeIfPresent(String.self, forKey: key), let s, !s.isEmpty { return s }
+        if let n = try? decodeIfPresent(Int.self, forKey: key), let n { return numericMapping[n] }
+        return nil
+    }
+}
+
+/// ProviderIds：服务端声明为 Dictionary<string,string>，
+/// 但个别刮削器/插件可能写入数字值，统一转成字符串，避免整个条目解码失败
+public struct ProviderIdMap: Codable, Equatable, Hashable {
+    public let values: [String: String]
+
+    public init(values: [String: String] = [:]) {
+        self.values = values
+    }
+
+    public init(from decoder: Decoder) throws {
+        guard let c = try? decoder.container(keyedBy: AnyCodingKey.self) else {
+            values = [:]
+            return
+        }
+        var dict: [String: String] = [:]
+        for key in c.allKeys {
+            if let s = try? c.decodeIfPresent(String.self, forKey: key), let s {
+                dict[key.stringValue] = s
+            } else if let n = try? c.decodeIfPresent(Int64.self, forKey: key), let n {
+                dict[key.stringValue] = String(n)
+            } else if let d = try? c.decodeIfPresent(Double.self, forKey: key), let d {
+                dict[key.stringValue] = String(d)
+            } else if let b = try? c.decodeIfPresent(Bool.self, forKey: key), let b {
+                dict[key.stringValue] = String(b)
+            }
+        }
+        values = dict
+    }
+}
+
 // MARK: - Emby Server Info
 
 public struct EmbyServer: Codable, Identifiable, Equatable, Hashable {
@@ -328,7 +427,7 @@ public struct MediaItem: Codable, Identifiable, Equatable, Hashable {
     public let mediaStreams: [MediaStream]?
     public let genres: [String]?
     public let studios: [NameIdPair]?
-    public let providerIds: [String: String]?
+    public let providerIds: ProviderIdMap?
     public let dateCreated: String?
     public let premiereDate: String?
     public let childCount: Int?
@@ -440,7 +539,7 @@ public struct UserData: Codable, Equatable, Hashable {
     public let played: Bool
     public let key: String?
     public let itemId: String?
-    
+
     enum CodingKeys: String, CodingKey {
         case rating = "Rating"
         case playedPercentage = "PlayedPercentage"
@@ -451,6 +550,20 @@ public struct UserData: Codable, Equatable, Hashable {
         case played = "Played"
         case key = "Key"
         case itemId = "ItemId"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        rating = c.lenientDouble(forKey: .rating)
+        playedPercentage = c.lenientDouble(forKey: .playedPercentage)
+        playbackPositionTicks = c.lenientInt64(forKey: .playbackPositionTicks)
+        playCount = c.lenientInt(forKey: .playCount)
+        // Emby（ServiceStack.Text）可能省略值为 false 的布尔字段，缺失时按 false 处理
+        isFavorite = c.lenientBool(forKey: .isFavorite)
+        likes = (try? c.decodeIfPresent(Bool.self, forKey: .likes)) ?? nil
+        played = c.lenientBool(forKey: .played)
+        key = c.lenientString(forKey: .key)
+        itemId = c.lenientString(forKey: .itemId)
     }
 }
 
@@ -517,6 +630,34 @@ public struct MediaSource: Codable, Identifiable, Equatable, Hashable {
         case bitrate = "Bitrate"
         case formats = "Formats"
     }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = c.lenientString(forKey: .id) ?? ""
+        // Protocol 枚举：服务端正常返回字符串名（File/Http...），个别版本返回数字；
+        // 字段整体缺失时对应服务端枚举默认值 File(0)，即本地文件直连
+        let protocolNames = [0: "File", 1: "Http", 2: "Rtmp", 3: "Rtsp", 4: "Udp", 5: "Rtp", 6: "Ftp"]
+        if let name = c.lenientEnumName(forKey: .protocol, numericMapping: protocolNames) {
+            `protocol` = name
+        } else if c.contains(.protocol) {
+            `protocol` = nil
+        } else {
+            `protocol` = "File"
+        }
+        path = c.lenientString(forKey: .path)
+        container = c.lenientString(forKey: .container)
+        size = c.lenientInt64(forKey: .size)
+        name = c.lenientString(forKey: .name)
+        runTimeTicks = c.lenientInt64(forKey: .runTimeTicks)
+        // 服务端构造函数中这三个字段默认值为 true，字段缺失（默认值被省略）时按 true 处理
+        supportsDirectPlay = c.lenientBool(forKey: .supportsDirectPlay, default: true)
+        supportsDirectStream = c.lenientBool(forKey: .supportsDirectStream, default: true)
+        supportsTranscoding = c.lenientBool(forKey: .supportsTranscoding, default: true)
+        transcodingSubProfiles = (try? c.decodeIfPresent([String].self, forKey: .transcodingSubProfiles)) ?? nil
+        mediaStreams = (try? c.decodeIfPresent([MediaStream].self, forKey: .mediaStreams)) ?? nil
+        bitrate = c.lenientInt(forKey: .bitrate)
+        formats = (try? c.decodeIfPresent([String].self, forKey: .formats)) ?? nil
+    }
 }
 
 public struct MediaStream: Codable, Equatable, Hashable {
@@ -531,7 +672,8 @@ public struct MediaStream: Codable, Equatable, Hashable {
     public let timeBase: String?
     public let videoRange: String?
     public let displayTitle: String?
-    public let nalLengthSize: Int?
+    /// 注意：服务端该字段为字符串（如 "0"、"4"、""），不是数字
+    public let nalLengthSize: String?
     public let isInterlaced: Bool
     public let isAnamorphic: Bool
     public let width: Int?
@@ -587,6 +729,53 @@ public struct MediaStream: Codable, Equatable, Hashable {
         case index = "Index"
         case score = "Score"
     }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        codec = c.lenientString(forKey: .codec)
+        codecTag = c.lenientString(forKey: .codecTag)
+        language = c.lenientString(forKey: .language)
+        colorTransfer = c.lenientString(forKey: .colorTransfer)
+        colorPrimaries = c.lenientString(forKey: .colorPrimaries)
+        colorSpace = c.lenientString(forKey: .colorSpace)
+        comment = c.lenientString(forKey: .comment)
+        streamStartTimeTicks = c.lenientInt64(forKey: .streamStartTimeTicks)
+        timeBase = c.lenientString(forKey: .timeBase)
+        videoRange = c.lenientString(forKey: .videoRange)
+        displayTitle = c.lenientString(forKey: .displayTitle)
+        nalLengthSize = c.lenientString(forKey: .nalLengthSize)
+        // 非可选布尔：服务端可能省略（默认 false）或返回 null，缺失时按 false 处理
+        isInterlaced = c.lenientBool(forKey: .isInterlaced)
+        isAnamorphic = c.lenientBool(forKey: .isAnamorphic)
+        width = c.lenientInt(forKey: .width)
+        height = c.lenientInt(forKey: .height)
+        averageFrameRate = c.lenientDouble(forKey: .averageFrameRate)
+        realFrameRate = c.lenientDouble(forKey: .realFrameRate)
+        level = c.lenientDouble(forKey: .level)
+        bitDepth = c.lenientInt(forKey: .bitDepth)
+        bitRate = c.lenientInt(forKey: .bitRate)
+        refFrames = c.lenientInt(forKey: .refFrames)
+        rotation = c.lenientInt(forKey: .rotation)
+        channels = c.lenientInt(forKey: .channels)
+        sampleRate = c.lenientInt(forKey: .sampleRate)
+        isDefault = c.lenientBool(forKey: .isDefault)
+        isForced = c.lenientBool(forKey: .isForced)
+        // Type 枚举：正常返回字符串名，个别版本/场景返回数字（0=Audio,1=Video,2=Subtitle...）；
+        // 字段整体缺失时对应服务端枚举默认值 Audio(0)
+        let streamTypeNames = [0: "Audio", 1: "Video", 2: "Subtitle", 3: "EmbeddedImage", 4: "Data", 5: "Lyric"]
+        if let name = c.lenientEnumName(forKey: .type, numericMapping: streamTypeNames) {
+            type = name
+        } else if c.contains(.type) {
+            type = nil
+        } else {
+            type = "Audio"
+        }
+        profile = c.lenientString(forKey: .profile)
+        aspectRatio = c.lenientString(forKey: .aspectRatio)
+        // 视频流的 Index 通常为 0，服务端可能省略该默认值字段
+        index = c.lenientInt(forKey: .index) ?? 0
+        score = c.lenientInt(forKey: .score)
+    }
 }
 
 // MARK: - Playback Info
@@ -595,11 +784,22 @@ public struct PlaybackInfoResponse: Codable {
     public let mediaSources: [MediaSource]
     public let playSessionId: String?
     public let errorCode: String?
-    
+
     enum CodingKeys: String, CodingKey {
         case mediaSources = "MediaSources"
         case playSessionId = "PlaySessionId"
         case errorCode = "ErrorCode"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        if let arr = try? c.decodeIfPresent([MediaSource].self, forKey: .mediaSources), let arr {
+            mediaSources = arr
+        } else {
+            mediaSources = []
+        }
+        playSessionId = c.lenientString(forKey: .playSessionId)
+        errorCode = c.lenientString(forKey: .errorCode)
     }
 }
 
@@ -886,10 +1086,25 @@ public struct ResponseProfile: Codable {
 public struct QueryResult<T: Codable>: Codable {
     public let items: [T]
     public let totalRecordCount: Int
-    
+
+    public init(items: [T] = [], totalRecordCount: Int = 0) {
+        self.items = items
+        self.totalRecordCount = totalRecordCount
+    }
+
     enum CodingKeys: String, CodingKey {
         case items = "Items"
         case totalRecordCount = "TotalRecordCount"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        if let arr = try? c.decodeIfPresent([T].self, forKey: .items), let arr {
+            items = arr
+        } else {
+            items = []
+        }
+        totalRecordCount = c.lenientInt(forKey: .totalRecordCount) ?? 0
     }
 }
 

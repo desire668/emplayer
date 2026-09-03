@@ -327,17 +327,14 @@ struct ItemDetailView: View {
                 } else {
                     LazyVStack(spacing: 6) {
                         ForEach(Array(episodes.enumerated()), id: \.element.id) { (idx, ep) in
-                            Button {
+                            EpisodeRow(item: ep) {
                                 playerContext = .init(
                                     item: ep,
                                     startTicks: ep.playbackPositionTicks,
                                     episodes: episodes,
                                     currentIndex: idx
                                 )
-                            } label: {
-                                EpisodeRow(item: ep)
                             }
-                            .buttonStyle(.plain)
                         }
                     }
                     .padding(.horizontal)
@@ -354,17 +351,14 @@ struct ItemDetailView: View {
         Section {
             LazyVStack(spacing: 6) {
                 ForEach(Array(episodes.enumerated()), id: \.element.id) { (idx, ep) in
-                    Button {
+                    EpisodeRow(item: ep) {
                         playerContext = .init(
                             item: ep,
                             startTicks: ep.playbackPositionTicks,
                             episodes: episodes,
                             currentIndex: idx
                         )
-                    } label: {
-                        EpisodeRow(item: ep)
                     }
-                    .buttonStyle(.plain)
                 }
             }
             .padding(.horizontal)
@@ -522,19 +516,20 @@ struct ItemDetailView: View {
 
 // MARK: - Episode Row
 
-// MARK: - 超长标题轮播
+// MARK: - 超长标题轮播（只在确实超出容器宽度时才滚动）
 
-/// 短标题正常显示；超长标题在单行内横向循环滚动（不增加额外高度）
 struct MarqueeTitle: View {
     let text: String
     @State private var offset: CGFloat = 0
     @State private var contentWidth: CGFloat = 0
     @State private var containerWidth: CGFloat = 0
-    @State private var shouldMarquee: Bool = false
+
+    private var needsMarquee: Bool {
+        contentWidth > containerWidth + 2     // 留 2pt 容差，避免临界抖动
+    }
 
     var body: some View {
         GeometryReader { geo in
-            let container = geo.size.width
             HStack(spacing: 0) {
                 Text(text)
                     .background(
@@ -542,28 +537,32 @@ struct MarqueeTitle: View {
                             Color.clear.preference(key: MarqueeWidthKey.self, value: proxy.size.width)
                         }
                     )
-                if shouldMarquee {
+                if needsMarquee {
                     Text("  " + text)
                 }
             }
-            .offset(x: shouldMarquee ? offset : 0)
-            .onAppear { containerWidth = container; startMarqueeIfNeeded() }
-            .onChange(of: text) { _, _ in offset = 0; startMarqueeIfNeeded() }
+            .offset(x: needsMarquee ? offset : 0)
+            .onAppear {
+                containerWidth = geo.size.width
+                DispatchQueue.main.async { startMarqueeIfNeeded() }
+            }
+            .onChange(of: text) { _, _ in
+                offset = 0
+                DispatchQueue.main.async { startMarqueeIfNeeded() }
+            }
             .onPreferenceChange(MarqueeWidthKey.self) { w in
                 contentWidth = w
-                shouldMarquee = w > containerWidth
-                if shouldMarquee { startMarqueeIfNeeded() }
+                DispatchQueue.main.async { startMarqueeIfNeeded() }
             }
-            .onChange(of: container) { _, v in containerWidth = v; shouldMarquee = contentWidth > v }
         }
         .fixedSize(horizontal: false, vertical: true)
     }
 
     private func startMarqueeIfNeeded() {
         offset = 0
-        guard shouldMarquee else { return }
+        guard needsMarquee else { return }
         let total = contentWidth + 12
-        let duration = max(4, total / 30)
+        let duration = max(5, total / 28)     // 慢一点更好读
         withAnimation(.linear(duration: duration).repeatForever(autoreverses: false)) {
             offset = -contentWidth - 6
         }
@@ -579,7 +578,14 @@ private struct MarqueeWidthKey: PreferenceKey {
 
 struct EpisodeRow: View {
     let item: MediaItem
-    
+    let onPlay: () -> Void
+
+    /// 有历史进度但未看完 → 显示"继续播放"
+    private var isContinue: Bool {
+        let ticks = item.userData?.playbackPositionTicks ?? 0
+        return ticks > 0 && !item.played
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             ZStack(alignment: .bottomLeading) {
@@ -597,8 +603,26 @@ struct EpisodeRow: View {
                         .foregroundStyle(.green)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                 }
+                // 右下角播放 / 继续播放按钮
+                Button(action: onPlay) {
+                    HStack(spacing: 4) {
+                        Image(systemName: isContinue ? "play.fill" : "play.fill")
+                            .font(.system(size: 12, weight: .bold))
+                        Text(isContinue ? "继续播放" : "播放")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .background(
+                        Capsule()
+                            .fill(isContinue ? Color.indigo : Color.black.opacity(0.55))
+                    )
+                }
+                .buttonStyle(.plain)
+                .padding(.trailing, 6).padding(.bottom, 6)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
             }
-            
+
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
                     Text(String(format: "E%02d", item.indexNumber ?? 0))

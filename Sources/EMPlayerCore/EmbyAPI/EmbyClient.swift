@@ -787,21 +787,25 @@ extension EmbyClient {
     
     // MARK: - Stream / File URLs
     
-    public func directStreamURL(mediaSource: MediaSource, startTimeTicks: Int64 = 0) -> URL? {
+    /// 直连 URL。Emby API 路径要求 **item.id**（不是 mediaSource.id），
+    /// MediaSourceId 作为 query 传入（该字段服务端常返回空字符串，需用 item.id 做 fallback）。
+    public func directStreamURL(itemId: String, mediaSource: MediaSource, startTimeTicks: Int64 = 0) -> URL? {
         guard let server = currentServer else { return nil }
         let base = server.baseURL()
+        let msId = mediaSource.id.isEmpty ? itemId : mediaSource.id
         var qs: [String] = []
-        qs.append("MediaSourceId=\(mediaSource.id)")
+        qs.append("MediaSourceId=\(msId)")
         qs.append("Static=true")
         qs.append("api_key=\(accessToken ?? "")")
         if startTimeTicks > 0 {
             qs.append("StartTimeTicks=\(startTimeTicks)")
         }
-        let path = "/emby/Videos/\(mediaSource.id)/stream?\(qs.joined(separator: "&"))"
+        let path = "/emby/Videos/\(itemId)/stream?\(qs.joined(separator: "&"))"
         return URL(string: base + path)
     }
     
     public func hlsTranscodeURL(
+        itemId: String,
         mediaSource: MediaSource,
         playSessionId: String,
         startTimeTicks: Int64 = 0,
@@ -814,8 +818,9 @@ extension EmbyClient {
     ) -> URL? {
         guard let server = currentServer else { return nil }
         let base = server.baseURL()
+        let msId = mediaSource.id.isEmpty ? itemId : mediaSource.id
         var qs: [String] = []
-        qs.append("MediaSourceId=\(mediaSource.id)")
+        qs.append("MediaSourceId=\(msId)")
         qs.append("PlaySessionId=\(playSessionId)")
         qs.append("StartTimeTicks=\(startTimeTicks)")
         qs.append("VideoCodec=\(videoCodec)")
@@ -825,7 +830,7 @@ extension EmbyClient {
         qs.append("api_key=\(accessToken ?? "")")
         if let ai = audioStreamIndex { qs.append("AudioStreamIndex=\(ai)") }
         if let si = subtitleStreamIndex { qs.append("SubtitleStreamIndex=\(si)") }
-        let path = "/emby/Videos/\(mediaSource.id)/master.m3u8?\(qs.joined(separator: "&"))"
+        let path = "/emby/Videos/\(itemId)/master.m3u8?\(qs.joined(separator: "&"))"
         return URL(string: base + path)
     }
     

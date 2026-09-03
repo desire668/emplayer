@@ -133,8 +133,6 @@ struct PlayerHostView: View {
                             .id(configureToken)
                             .onAppear { installPlayer() }
                             .frame(width: geo.size.width, height: geo.size.height)
-                        subtitleOverlay
-                        if isBuffering { bufferingView }
                     } else {
                         // 竖屏：画面在顶部 16:9，下方空出放控件
                         VStack(spacing: 0) {
@@ -147,8 +145,13 @@ struct PlayerHostView: View {
                         }
                         .frame(width: geo.size.width, height: geo.size.height - topInset)
                         .padding(.top, topInset)
-                        subtitleOverlay
-                        if isBuffering { bufferingView }
+                    }
+                    subtitleOverlay
+
+                    // 缓冲提示：**全屏居中**（而非视频区内居中）
+                    if isBuffering {
+                        bufferingView
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 } else {
                     fatalView
@@ -339,7 +342,7 @@ struct PlayerHostView: View {
     // MARK: - 单胶囊底栏：时间+控制+进度+菜单 一行排列；所有按钮统一 36x36
 
     private func bottomBar(isLandscape: Bool) -> some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             Text(timeString(Int(coordinator.timemodel.currentTime)))
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.white)
@@ -379,28 +382,27 @@ struct PlayerHostView: View {
                 .frame(width: 36, height: 36)
             }
 
-            // 进度条（接在播放按钮右边）
-            Slider(
-                value: Binding(
-                    get: { isSeeking ? seekValue : Double(coordinator.timemodel.currentTime) },
-                    set: { seekValue = $0 }
-                ),
-                in: 0...max(1, Double(coordinator.timemodel.totalTime))
-            ) { editing in
-                isSeeking = editing
-                if !editing {
-                    coordinator.seek(time: seekValue)
+            // 进度条：自定义 Track（无 thumb），支持点击 + 拖拽 seek
+            SeekProgressTrack(
+                current: isSeeking ? seekValue : Double(coordinator.timemodel.currentTime),
+                total: max(1, Double(coordinator.timemodel.totalTime)),
+                onSeek: { value, finishing in
+                    seekValue = value
+                    isSeeking = true
+                    if finishing {
+                        coordinator.seek(time: value)
+                        isSeeking = false
+                    }
                 }
-            }
-            .tint(.indigo)
-            .controlSize(.mini)
+            )
+            .frame(height: 22)
 
             Text(timeString(coordinator.timemodel.totalTime))
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.white)
                 .frame(width: 34, alignment: .trailing)
 
-            // 右侧功能按钮（每个统一 36x36，HStack spacing: 10 保证间隔一致）
+            // 右侧功能按钮（每个统一 36x36，HStack spacing: 10）
             HStack(spacing: 10) {
                 scaleModeMenu
                 audioTrackMenu
@@ -704,23 +706,26 @@ struct PlayerHostView: View {
     }
 
     private func rebuildPlaybackURL(with source: MediaSource, mode: PlayMode) {
+        let itemId = item.id
+        let sid = playSessionId ?? UUID().uuidString
         switch mode {
         case .directStream:
-            playbackURL = EmbyClient.shared.directStreamURL(mediaSource: source)
-                ?? EmbyClient.shared.hlsTranscodeURL(
-                    mediaSource: source,
-                    playSessionId: playSessionId ?? UUID().uuidString,
-                    startTimeTicks: startTicks
-                )
-        case .hlsTranscode:
-            if source.supportsTranscoding, let sid = playSessionId {
+            // 不支持直连时强制走 HLS 转码
+            if source.supportsDirectStream {
+                playbackURL = EmbyClient.shared.directStreamURL(itemId: itemId, mediaSource: source)
+            }
+            if playbackURL == nil {
                 playbackURL = EmbyClient.shared.hlsTranscodeURL(
-                    mediaSource: source,
-                    playSessionId: sid,
-                    startTimeTicks: startTicks
+                    itemId: itemId, mediaSource: source, playSessionId: sid, startTimeTicks: startTicks
+                )
+            }
+        case .hlsTranscode:
+            if source.supportsTranscoding {
+                playbackURL = EmbyClient.shared.hlsTranscodeURL(
+                    itemId: itemId, mediaSource: source, playSessionId: sid, startTimeTicks: startTicks
                 )
             } else {
-                playbackURL = EmbyClient.shared.directStreamURL(mediaSource: source)
+                playbackURL = EmbyClient.shared.directStreamURL(itemId: itemId, mediaSource: source)
             }
         }
     }
@@ -827,5 +832,47 @@ struct PlayerHostView: View {
         guard reporterActive else { return }
         reporterActive = false
         PlaybackReporter.shared.stop(playedToCompletion: playedToCompletion)
+    }
+}
+
+// MARK: - 自定义无滑块进度条（整条可点击/拖拽 seek）
+
+private struct SeekProgressTrack: View {
+    let current: Double
+    let total: Double
+    let onSeek: (Double, Bool) -> Void     // (value, finishing)
+
+    var body: some View {
+        GeometryReader { geo in
+            let width = geo.size.width
+            let progress = min(max(current / total, 0), 1)
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(.white.opacity(0.25))
+                    .frame(height: 4)
+                Capsule()
+                    .fill(Color.indigo)
+                    .frame(width: width * progress, height: 4)
+            }
+            .frame(width: width, height: geo.size.height)
+            .contentShape(Rectangle())
+            .onTapGesture { point in
+                let value = Double(point.x / width) * total
+                onSeek(value, true)
+            }
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { g in
+                        let x = min(max(g.location.x, 0), width)
+                        let value = Double(x / width) * total
+                        onSeek(value, false)
+                    }
+                    .onEnded { g in
+                        let x = min(max(g.location.x, 0), width)
+                        let value = Double(x / width) * total
+                        onSeek(value, true)
+                    }
+            )
+        }
     }
 }

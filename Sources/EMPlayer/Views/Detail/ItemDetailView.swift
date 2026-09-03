@@ -234,16 +234,20 @@ struct ItemDetailView: View {
     private var overviewSection: some View {
         Group {
             let ov = effectiveItem.overview ?? ""
-            if !ov.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("简介").font(.headline)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("简介").font(.headline)
+                if !ov.isEmpty {
                     Text(ov)
                         .font(.body)
                         .foregroundStyle(.secondary)
                         .lineSpacing(4)
+                } else {
+                    Text("暂无简介")
+                        .font(.body.italic())
+                        .foregroundStyle(.tertiary)
                 }
-                .padding(.horizontal)
             }
+            .padding(.horizontal)
             if let genres = effectiveItem.genres, !genres.isEmpty {
                 HStack(spacing: 6) {
                     ForEach(genres.prefix(5), id: \.self) { g in

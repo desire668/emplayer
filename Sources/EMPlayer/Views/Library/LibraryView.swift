@@ -291,9 +291,15 @@ struct LibraryFolderView: View {
         loading = true
         errorMsg = nil
         do {
-            // 剧集库默认只显示 Series 级别（不展开到每集），其他库过滤掉 Episode 类型
+            // 按媒体库类型限定条目类型：剧集库只显示 Series（不展开到每集），
+            // 电影库只显示 Movie（避免未刮削的副本/额外片段等杂项混入）。
             let colType = folder.collectionType?.lowercased() ?? ""
-            let includeTypes: [String]? = colType == "tvshows" ? ["Series"] : nil
+            let includeTypes: [String]?
+            switch colType {
+            case "tvshows": includeTypes = ["Series"]
+            case "movies":  includeTypes = ["Movie"]
+            default:        includeTypes = nil
+            }
             let result = try await EmbyClient.shared.getItems(
                 parentId: folder.id,
                 filters: filter.filters.isEmpty ? nil : filter.filters,
@@ -306,13 +312,25 @@ struct LibraryFolderView: View {
                 isFavorite: filter.isFavorite,
                 hasPlayed: filter.hasPlayed
             )
-            // 双重保险：客户端再过滤掉 Episode 类型（部分服务器不遵 IncludeItemTypes）
-            items = result.items.filter { ($0.type ?? "").caseInsensitiveCompare("Episode") != .orderedSame }
+            // 双重保险：
+            // 1) 过滤掉 Episode 类型（部分服务器不遵 IncludeItemTypes）；
+            // 2) 过滤掉未刮削成功的重复/孤立条目——其名称保留原始文件名，含 "tmdbid="。
+            items = result.items.filter { item in
+                guard (item.type ?? "").caseInsensitiveCompare("Episode") != .orderedSame else { return false }
+                return !Self.isOrphanName(MediaTypeUtils.displayTitle(item))
+            }
             total = result.totalRecordCount
         } catch {
             errorMsg = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
         loading = false
+    }
+
+    /// 判断条目名是否为「未刮削的重复/孤立文件」：名称保留原始文件名，含 tmdbid= 标记。
+    /// 这类条目通常是同一部影片的第二个未识别副本，在列表中隐藏。
+    private static func isOrphanName(_ name: String) -> Bool {
+        let lower = name.lowercased()
+        return lower.contains("tmdbid=") || lower.contains("tmdb_id=")
     }
 }
 

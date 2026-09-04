@@ -787,8 +787,8 @@ extension EmbyClient {
     
     // MARK: - Stream / File URLs
     
-    /// 直连 URL。Emby API 路径要求 **item.id**（不是 mediaSource.id），
-    /// MediaSourceId 作为 query 传入（该字段服务端常返回空字符串，需用 item.id 做 fallback）。
+    /// 直连（直流）播放地址：/Videos/{itemId}/stream?Static=true&MediaSourceId=...
+    /// - 路径使用视频项 ID（itemId）；MediaSourceId 作为查询参数，为空时回退 itemId。
     public func directStreamURL(itemId: String, mediaSource: MediaSource, startTimeTicks: Int64 = 0) -> URL? {
         guard let server = currentServer else { return nil }
         let base = server.baseURL()
@@ -803,7 +803,9 @@ extension EmbyClient {
         let path = "/emby/Videos/\(itemId)/stream?\(qs.joined(separator: "&"))"
         return URL(string: base + path)
     }
-    
+
+    /// 转码 HLS 播放地址：/Videos/{itemId}/master.m3u8?MediaSourceId=...&PlaySessionId=...
+    /// - 路径使用视频项 ID（itemId）；MediaSourceId 作为查询参数，为空时回退 itemId。
     public func hlsTranscodeURL(
         itemId: String,
         mediaSource: MediaSource,

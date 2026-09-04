@@ -771,8 +771,9 @@ struct PlayerHostView: View {
     private func rebuildPlaybackURL(with source: MediaSource, mode: PlayMode) {
         switch mode {
         case .directStream:
-            playbackURL = EmbyClient.shared.directStreamURL(mediaSource: source)
+            playbackURL = EmbyClient.shared.directStreamURL(itemId: item.id, mediaSource: source)
                 ?? EmbyClient.shared.hlsTranscodeURL(
+                    itemId: item.id,
                     mediaSource: source,
                     playSessionId: playSessionId ?? UUID().uuidString,
                     startTimeTicks: startTicks
@@ -780,12 +781,13 @@ struct PlayerHostView: View {
         case .hlsTranscode:
             if source.supportsTranscoding, let sid = playSessionId {
                 playbackURL = EmbyClient.shared.hlsTranscodeURL(
+                    itemId: item.id,
                     mediaSource: source,
                     playSessionId: sid,
                     startTimeTicks: startTicks
                 )
             } else {
-                playbackURL = EmbyClient.shared.directStreamURL(mediaSource: source)
+                playbackURL = EmbyClient.shared.directStreamURL(itemId: item.id, mediaSource: source)
             }
         }
     }

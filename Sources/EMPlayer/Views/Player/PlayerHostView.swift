@@ -396,7 +396,11 @@ struct PlayerHostView: View {
                 if isLandscape {
                     volumeButton
                 }
-                // 更多：选集 / 倍速 / 字幕 / 音轨 / 画面比例 / 播放模式
+                // 选集（仅多集内容显示：电视剧/合集）
+                if playlist.count > 1 {
+                    episodesMenu
+                }
+                // 更多：倍速 / 字幕 / 音轨 / 画面比例 / 播放模式
                 moreMenu
                 // 横竖屏切换（= 全屏进入 / 退出）
                 orientationButton(isLandscape: isLandscape)
@@ -508,17 +512,39 @@ struct PlayerHostView: View {
         .buttonStyle(.plain)
     }
 
-    /// 「更多」菜单：选集 / 倍速 / 字幕 / 音轨 / 画面比例 / 播放模式（Picker 自带勾选状态）
-    private var moreMenu: some View {
+    /// 选集按钮（独立于「更多」菜单）：当前集号显示为角标，点击弹出集数列表
+    private var episodesMenu: some View {
         Menu {
-            if playlist.count > 1 {
-                Picker("选集", selection: $currentIndex) {
-                    ForEach(Array(playlist.enumerated()), id: \.offset) { idx, ep in
-                        Text(episodeLabel(ep, idx: idx)).tag(idx)
-                    }
+            Picker("选集", selection: $currentIndex) {
+                ForEach(Array(playlist.enumerated()), id: \.offset) { idx, ep in
+                    Text(episodeMenuLabel(ep, idx: idx)).tag(idx)
                 }
             }
+        } label: {
+            ZStack {
+                Image(systemName: "list.bullet")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+                // 当前集数角标
+                Text("\(currentIndex + 1)")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.indigo)
+                    .padding(.horizontal, 4)
+                    .frame(minWidth: 16, minHeight: 14)
+                    .background(Capsule().fill(Color.white))
+                    .offset(x: 13, y: -12)
+            }
+        }
+        .buttonStyle(.plain)
+        // 打开菜单时常驻控制层（菜单打开期间不自动隐藏）
+        .simultaneousGesture(TapGesture().onEnded { keepControlsVisible() })
+    }
 
+    /// 「更多」菜单：倍速 / 字幕 / 音轨 / 画面比例 / 播放模式（Picker 自带勾选状态）
+    private var moreMenu: some View {
+        Menu {
             Picker("倍速",
                    selection: Binding<Float>(
                        get: { coordinator.playbackRate },
@@ -645,13 +671,22 @@ struct PlayerHostView: View {
         coordinator.isMaskShow = false
     }
 
-    // MARK: - 选集标签（「更多」菜单使用）
+    // MARK: - 选集标签
 
-    private func episodeLabel(_ it: MediaItem, idx: Int) -> String {
+    /// 选集菜单项标签：S01E02 · 集名（无集号则「第N集」；无有效集名则只显示集号）
+    private func episodeMenuLabel(_ it: MediaItem, idx: Int) -> String {
+        let prefix: String
         if let s = it.parentIndexNumber, let e = it.indexNumber {
-            return String(format: "S%02dE%02d", s, e)
+            prefix = String(format: "S%02dE%02d", s, e)
+        } else {
+            prefix = "第\(idx + 1)集"
         }
-        return "\(idx + 1)"
+        let name = it.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        // 名称为空或是未刮削的原始文件名（含 tmdbid=）时只显示集号
+        if name.isEmpty || name.lowercased().contains("tmdbid=") {
+            return prefix
+        }
+        return "\(prefix) · \(name)"
     }
 
     // MARK: - Loading / Fatal

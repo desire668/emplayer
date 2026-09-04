@@ -134,17 +134,18 @@ struct PlayerHostView: View {
                 if isLoading {
                     loadingView
                 } else if let url = playbackURL {
-                    if isLandscape {
-                        // 横屏（全屏）：视频铺满整个窗口
-                        videoArea(url: url, isLandscape: isLandscape, insets: insets)
-                            .frame(width: geo.size.width, height: geo.size.height)
-                    } else {
-                        // 竖屏（窗口化）：画面 16:9 在整屏垂直居中，上下留黑
-                        videoArea(url: url, isLandscape: isLandscape, insets: insets)
-                            .frame(width: geo.size.width, height: geo.size.width * 9.0 / 16.0)
-                            .clipShape(Rectangle())
-                            .frame(maxHeight: .infinity)
-                    }
+                    // 关键：播放器视图必须是「同一个实例」，横竖屏只改变其 frame，
+                    // 绝不能放进 if/else 两个分支——否则切换方向时 SwiftUI 会销毁/重建
+                    // UIViewRepresentable，触发 KSVideoPlayer.dismantleUIView →
+                    // coordinator.resetPlayer()，播放器内核被释放，横屏就没画面了。
+                    let videoHeight = isLandscape
+                        ? geo.size.height                              // 横屏：全屏
+                        : geo.size.width * 9.0 / 16.0                  // 竖屏：16:9
+                    videoArea(url: url, isLandscape: isLandscape, insets: insets)
+                        .frame(width: geo.size.width, height: videoHeight)
+                        .clipped()
+                        // 竖屏时在整屏黑色区域内垂直居中；横屏时本就铺满（无影响）
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     fatalView
                 }

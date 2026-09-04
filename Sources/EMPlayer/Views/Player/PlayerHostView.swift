@@ -535,16 +535,17 @@ struct PlayerHostView: View {
             }
 
             if let tracks = coordinator.playerLayer?.player.tracks(mediaType: .audio), !tracks.isEmpty {
+                // 官方 KSPlayer 写法：Picker 绑定 trackID（Int32?），选中时按 trackID 查找后切换
                 Picker("音轨",
-                       selection: Binding<Int>(
-                           get: { tracks.firstIndex(where: { $0.isEnabled }) ?? 0 },
-                           set: { idx in
-                               if idx >= 0, idx < tracks.count {
-                                   coordinator.playerLayer?.player.select(track: tracks[idx])
+                       selection: Binding<Int32?>(
+                           get: { tracks.first { $0.isEnabled }?.trackID },
+                           set: { value in
+                               if let track = tracks.first(where: { $0.trackID == value }) {
+                                   coordinator.playerLayer?.player.select(track: track)
                                }
                            })) {
-                    ForEach(Array(tracks.enumerated()), id: \.element.trackID) { idx, track in
-                        Text(track.name).tag(idx)
+                    ForEach(tracks, id: \.trackID) { track in
+                        Text(track.name).tag(track.trackID as Int32?)
                     }
                 }
             }

@@ -156,6 +156,11 @@ jobs:
 
       - name: 构建 Simulator 版本
         run: |
+          # 关键：必须 pipefail。否则 `xcodebuild | xcbeautify` 的退出码取自
+          # xcbeautify（恒为 0），编译失败也会被当成“成功”，
+          # 导致模拟器 job 假绿、错误只在真机 job 暴露。
+          set -o pipefail
+          mkdir -p Build
           xcodebuild \
             -project "${{ env.APP_NAME }}.xcodeproj" \
             -scheme "${{ env.APP_NAME }}" \
@@ -165,7 +170,7 @@ jobs:
             -derivedDataPath DerivedData \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            build | xcbeautify --renderer github-actions
+            build 2>&1 | tee Build/build-simulator.log | xcbeautify --renderer github-actions
 
       - name: 上传 Simulator .app
         if: always()
@@ -304,7 +309,13 @@ jobs:
           dump_fail_summary() {
             {
               echo ""
-              echo "### ❌ iOS 真机 ${CFG} 构建失败 — 构建日志尾部"
+              echo "### ❌ iOS 真机 ${CFG} 构建失败 — 编译错误摘要"
+              echo '```'
+              grep -E "error:|fatalError|Segmentation|signal" "${LOG_FILE}" 2>/dev/null | head -n 40 \
+                || echo "(未匹配到 error 行)"
+              echo '```'
+              echo ""
+              echo "### 构建日志尾部"
               echo '```'
               tail -n 250 "${LOG_FILE}" 2>/dev/null || echo "(日志文件不存在)"
               echo '```'

@@ -681,7 +681,8 @@ struct PlayerHostView: View {
         } else {
             prefix = "第\(idx + 1)集"
         }
-        let name = it.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        // MediaItem.name 是非可选 String，直接用，不能做可选链
+        let name = it.name.trimmingCharacters(in: .whitespacesAndNewlines)
         // 名称为空或是未刮削的原始文件名（含 tmdbid=）时只显示集号
         if name.isEmpty || name.lowercased().contains("tmdbid=") {
             return prefix
